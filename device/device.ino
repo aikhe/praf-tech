@@ -60,11 +60,11 @@ float humidity = 0.0;
 
 String AISuggestion = "";
 
-#define TTS_GOOGLE_LANGUAGE "en"     // Use "tl" for Tagalog
+#define TTS_GOOGLE_LANGUAGE "en"  // "tl" for Tagalog
 
 // Dual timer configuration
-#define LED_HOLD_TIME 500       // Minimum time (ms) before LED can change (debounce)
-#define LED_ON_DURATION 20000   // Time LED stays on once activated (20 seconds)
+#define LED_HOLD_TIME 6000       // Minimum time (ms) before LED can change (debounce)
+#define LED_ON_DURATION 40000   // Time LED stays on once activated (20 seconds)
 
 unsigned long lastLedChangeTime = 0;  // For tracking LED hold time (debounce)
 unsigned long ledActivationTime = 0;  // For tracking how long LED has been active
@@ -80,6 +80,10 @@ uint8_t numChunks = 0;
 
 unsigned long lastPlayTime = 0;
 const unsigned long playInterval = 60000UL;
+
+// Global variable to track audio state
+bool playingFirstFile = false;
+int currentAlertState = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -145,6 +149,7 @@ void setup() {
   digitalWrite(LED_TWO, LOW);
   digitalWrite(LED_THREE, LOW);
 
+  // Buttons
   pinMode(BTTN_AI, INPUT_PULLUP);
   pinMode(BTTN_SMS, INPUT_PULLUP);
 }
@@ -244,6 +249,20 @@ void loop() {
     delay(1000); // debounce delay
   }
 
+  // Check if first file is done playing and we need to play the alert
+  if (playingFirstFile && !audio.isRunning()) {
+    playingFirstFile = false;
+    
+    // Play the corresponding alert file
+    if (currentAlertState == 1) {
+      audio.connecttoFS(SD, "LOW-ALERT.mp3");
+    } else if (currentAlertState == 2) {
+      audio.connecttoFS(SD, "MEDIUM-ALERT.mp3");
+    } else if (currentAlertState == 3) {
+      audio.connecttoFS(SD, "HIGH-ALERT.mp3");
+    }
+  }
+
   audio.loop();
 }
 
@@ -308,17 +327,50 @@ void updateLEDs(int state) {
   switch (state) {
     case 1:
       digitalWrite(LED_ONE, HIGH);
+      currentAlertState = 1;
+      playingFirstFile = true;
       audio.connecttoFS(SD, "LOW-FLOOD.mp3");
       break;
     case 2:
       digitalWrite(LED_TWO, HIGH);
+      currentAlertState = 2;
+      playingFirstFile = true;
       audio.connecttoFS(SD, "MEDIUM-FLOOD.mp3");
       break;
     case 3:
       digitalWrite(LED_THREE, HIGH);
+      currentAlertState = 3;
+      playingFirstFile = true;
       audio.connecttoFS(SD, "HIGH-FLOOD.mp3");
       break;
     // case 0 or default: all LEDs remain off
+  }
+}
+
+void handleAudioSequence() {
+  static int pendingAlertState = 0;
+  static bool playingFlood = false;
+  static unsigned long floodStartTime = 0;
+  
+  // If we're not currently playing anything, but we have a pending alert
+  if (!audio.isRunning() && playingFlood) {
+    // First audio finished playing, now play the alert
+    playingFlood = false;
+    
+    switch (pendingAlertState) {
+      case 1:
+        audio.connecttoFS(SD, "LOW-ALERT.mp3");
+        break;
+      case 2:
+        audio.connecttoFS(SD, "MEDIUM-ALERT.mp3");
+        break;
+      case 3:
+        audio.connecttoFS(SD, "HIGH-ALERT.mp3");
+        break;
+    }
+    
+    // Reset pending state
+    pendingAlertState = 0;
   }
 }
 
