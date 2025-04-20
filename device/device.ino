@@ -1,11 +1,27 @@
+#include "Arduino.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include "Audio.h"
+#include "SD.h"
+#include "FS.h"
+#include "SPI.h"
 
 // Wifi
 #define SSID              "TK-gacura"
 #define PASSWORD          "gisaniel924"
+
+// microSD Card Reader connections
+#define SD_CS          5
+#define SPI_MOSI      23 
+#define SPI_MISO      19
+#define SPI_SCK       18
+
+// I2S Connections (MAX98357)
+#define I2S_DOUT      25
+#define I2S_BCLK      27
+#define I2S_LRC       26
 
 // HC-SRO4 Sensor
 #define TRIG_PIN 17
@@ -27,6 +43,9 @@
 const char *weatherApiKey = "7970309436bc52d518c7e71e314b8053";
 const char *geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 
+// Create Audio object
+Audio audio;
+
 float fallback_latitude = 14.7160;
 float fallback_longitude = 121.0615;
 
@@ -41,6 +60,8 @@ float humidity = 0.0;
 
 String AISuggestion = "";
 
+#define TTS_GOOGLE_LANGUAGE "en"     // Use "tl" for Tagalog
+
 // Dual timer configuration
 #define LED_HOLD_TIME 500       // Minimum time (ms) before LED can change (debounce)
 #define LED_ON_DURATION 20000   // Time LED stays on once activated (20 seconds)
@@ -51,6 +72,14 @@ int currentLedState = 0;    // 0: none, 1: LED_ONE, 2: LED_TWO, 3: LED_THREE
 bool ledActivated = false;  // Whether any LED is currently in its 20-second active period
 
 int lastButtonState = HIGH;
+
+// Sentence chunks
+#define MAX_CHUNKS 10
+String sentenceChunks[MAX_CHUNKS];
+uint8_t numChunks = 0;
+
+unsigned long lastPlayTime = 0;
+const unsigned long playInterval = 60000UL;
 
 void setup() {
   Serial.begin(115200);
@@ -63,6 +92,27 @@ void setup() {
   }
   Serial.println("\nConnected to WiFi\n");
   getNumbers();
+
+  // Set microSD Card CS as OUTPUT and set HIGH
+  pinMode(SD_CS, OUTPUT);      
+  digitalWrite(SD_CS, HIGH); 
+
+  // Initialize SPI bus for microSD Card
+  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+
+  // Initialize microSD card with custom SPI
+  if (!SD.begin(SD_CS, SPI)) {
+    Serial.println("Error accessing microSD card!");
+    while (true); 
+  }
+
+  Serial.println("microSD card initialized.");
+
+  // Setup I2S 
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+
+  // Set Volume (0 to 21)
+  audio.setVolume(100);
 
   // HC-SRO4 Sensor
   pinMode(TRIG_PIN, OUTPUT);
@@ -159,13 +209,79 @@ void loop() {
 
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
+
+    audio.loop();
+    audio.connecttoFS(SD, "AI-NOTIF.mp3");
+
     if (getLocationFromIpInfo() || (latitude = fallback_latitude, longitude = fallback_longitude, true)) {
       if (getWeather()) {
+
         getAISuggestion();
+
+        Serial.print("AISuggestion: ");
+        Serial.println(AISuggestion);
+
+        playFloodWarning();
+        lastPlayTime = millis();
         delay(1000); // debounce delay
       }
     }
+
   }
+
+  audio.loop();
+}
+
+// 🔊 Speak in smart chunks
+void speakTextInChunks(String text, int maxLength) {
+  // Use a smaller chunk size
+  int chunkSize = 60; // Reduced from 100
+  
+  int start = 0;
+  while (start < text.length()) {
+    int end = start + chunkSize;
+    
+    // Ensure we don't split in the middle of a word
+    if (end < text.length()) {
+      // Prefer ending at punctuation
+      int punctEnd = end;
+      while (punctEnd > start && text[punctEnd] != '.' && text[punctEnd] != ',' && text[punctEnd] != ';' && text[punctEnd] != ':') {
+        punctEnd--;
+      }
+      
+      // If we found punctuation, use that as the end point
+      if (punctEnd > start && (text[punctEnd] == ',' || text[punctEnd] == ';' || text[punctEnd] == ':')) {
+        end = punctEnd + 1; // Include the punctuation
+      } else {
+        // Otherwise find a space
+        while (end > start && text[end] != ' ') {
+          end--;
+        }
+        if (end == start) {
+          end = start + chunkSize; // Worst case, just cut at max length
+        }
+      }
+    }
+    
+    String chunk = text.substring(start, end);
+    chunk.trim(); // Remove any leading/trailing spaces
+    
+    if (chunk.length() > 0) {
+      Serial.println("Playing chunk: '" + chunk + "'");
+      Serial.println("Start: " + String(start) + ", End: " + String(end));
+      
+      audio.connecttospeech(chunk.c_str(), TTS_GOOGLE_LANGUAGE);
+      while (audio.isRunning()) {
+        audio.loop();
+      }
+    }
+    
+    start = end;
+  }
+}
+
+void playFloodWarning() {
+  speakTextInChunks(AISuggestion, 100); // Split into chunks of ~100 characters
 }
 
 // Function to update LEDs based on the state
@@ -177,12 +293,15 @@ void updateLEDs(int state) {
   switch (state) {
     case 1:
       digitalWrite(LED_ONE, HIGH);
+      audio.connecttoFS(SD, "LOW-FLOOD.mp3");
       break;
     case 2:
       digitalWrite(LED_TWO, HIGH);
+      audio.connecttoFS(SD, "MEDIUM-FLOOD.mp3");
       break;
     case 3:
       digitalWrite(LED_THREE, HIGH);
+      audio.connecttoFS(SD, "HIGH-FLOOD.mp3");
       break;
     // case 0 or default: all LEDs remain off
   }
