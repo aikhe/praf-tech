@@ -93,6 +93,25 @@ void setup() {
   Serial.println("\nConnected to WiFi\n");
   getNumbers();
 
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected to WiFi");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Get location from ipinfo.io
+    if (getLocationFromIpInfo()) {
+      Serial.println("Successfully obtained location from ipinfo.io");
+    } else {
+      latitude = fallback_latitude;
+      longitude = fallback_longitude;
+      Serial.println("Using fallback coordinates");
+    }
+
+    getWeather();
+  } else {
+    Serial.println("\nFailed to connect to WiFi");
+  }
+
   // Set microSD Card CS as OUTPUT and set HIGH
   pinMode(SD_CS, OUTPUT);      
   digitalWrite(SD_CS, HIGH); 
@@ -210,23 +229,19 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
-    audio.loop();
+    getAISuggestion();
+
     audio.connecttoFS(SD, "AI-NOTIF.mp3");
-
-    if (getLocationFromIpInfo() || (latitude = fallback_latitude, longitude = fallback_longitude, true)) {
-      if (getWeather()) {
-
-        getAISuggestion();
-
-        Serial.print("AISuggestion: ");
-        Serial.println(AISuggestion);
-
-        playFloodWarning();
-        lastPlayTime = millis();
-        delay(1000); // debounce delay
-      }
+    while (audio.isRunning()) {
+      audio.loop();
     }
 
+    Serial.print("AISuggestion: ");
+    Serial.println(AISuggestion);
+
+    playFloodWarning();
+    lastPlayTime = millis();
+    delay(1000); // debounce delay
   }
 
   audio.loop();
