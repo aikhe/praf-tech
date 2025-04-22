@@ -47,8 +47,8 @@ const char *geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 // Create Audio object
 Audio audio;
 
-float fallback_latitude = 14.7160;
-float fallback_longitude = 121.0615;
+float fallback_latitude = 14.6456;
+float fallback_longitude = 121.0282;
 
 float latitude = 0.0;
 float longitude = 0.0;
@@ -65,7 +65,7 @@ String AISuggestion = "";
 
 // Dual timer configuration
 #define LED_HOLD_TIME 6000     // Minimum time (ms) before LED can change (debounce)
-#define LED_ON_DURATION 40000  // Time LED stays on once activated (20 seconds)
+#define LED_ON_DURATION 60000  // Time LED stays on once activated (20 seconds)
 
 unsigned long lastLedChangeTime = 0;  // For tracking LED hold time (debounce)
 unsigned long ledActivationTime = 0;  // For tracking how long LED has been active
@@ -78,7 +78,7 @@ String sentenceChunks[MAX_CHUNKS];
 uint8_t numChunks = 0;
 
 unsigned long lastPlayTime = 0;
-const unsigned long playInterval = 60000UL;
+const unsigned long playInterval = 440000UL;
 
 // Global variable to track audio state
 bool playingFirstFile = false;
@@ -113,17 +113,26 @@ void setup() {
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
 
-    // Get location from ipinfo.io
-    if (getLocationFromIpInfo()) {
-      Serial.println("Successfully obtained location from ipinfo.io");
-      if (getWeather()) {
-        getAISuggestion();
-      }
-    } else {
-      latitude = fallback_latitude;
-      longitude = fallback_longitude;
-      Serial.println("Using fallback coordinates");
+    latitude = fallback_latitude;
+    longitude = fallback_longitude;
+
+    if (getWeather()) {
+      getAISuggestion();
     }
+
+    // Get location from ipinfo.io
+    // if (getLocationFromIpInfo()) {
+    //   Serial.println("Successfully obtained location from ipinfo.io");
+    //   if (getWeather()) {
+    //     getAISuggestion();
+    //   }
+    //   latitude = fallback_latitude;
+    //   longitude = fallback_longitude;
+    // } else {
+    //   latitude = fallback_latitude;
+    //   longitude = fallback_longitude;
+    //   Serial.println("Using fallback coordinates");
+    // }
   } else {
     Serial.println("\nFailed to connect to WiFi");
   }
@@ -284,37 +293,41 @@ void loop() {
 
     Serial.print("isRunning: ");
     Serial.println(isRunning);
-    if (isRunning) {
-      unsigned long currentMillis = millis();
+    // if (isRunning) {
+    //   unsigned long currentMillis = millis();
 
-      if (currentMillis - previousMillis >= interval) {
-        previousMillis = currentMillis;  // update previousMills state
+    //   if (currentMillis - previousMillis >= interval) {
+    //     previousMillis = currentMillis;  // update previousMills state
 
-        if (currentLED == 0) {
-          digitalWrite(AI_LED_ONE, HIGH);
-          digitalWrite(AI_LED_TWO, LOW);
-          digitalWrite(AI_LED_THREE, LOW);
-        } else if (currentLED == 1) {
-          digitalWrite(AI_LED_ONE, LOW);
-          digitalWrite(AI_LED_TWO, HIGH);
-          digitalWrite(AI_LED_THREE, LOW);
-        } else if (currentLED == 2) {
-          digitalWrite(AI_LED_ONE, LOW);
-          digitalWrite(AI_LED_TWO, LOW);
-          digitalWrite(AI_LED_THREE, HIGH);
-        }
+    //     if (currentLED == 0) {
+    //       digitalWrite(AI_LED_ONE, HIGH);
+    //       digitalWrite(AI_LED_TWO, LOW);
+    //       digitalWrite(AI_LED_THREE, LOW);
+    //     } else if (currentLED == 1) {
+    //       digitalWrite(AI_LED_ONE, LOW);
+    //       digitalWrite(AI_LED_TWO, HIGH);
+    //       digitalWrite(AI_LED_THREE, LOW);
+    //     } else if (currentLED == 2) {
+    //       digitalWrite(AI_LED_ONE, LOW);
+    //       digitalWrite(AI_LED_TWO, LOW);
+    //       digitalWrite(AI_LED_THREE, HIGH);
+    //     }
 
-        currentLED = (currentLED + 1) % 3;  // Loop between 0, 1, 2 (gets the median)
-      }
-    } else {
-      digitalWrite(AI_LED_ONE, LOW);
-      digitalWrite(AI_LED_TWO, LOW);
-      digitalWrite(AI_LED_THREE, LOW);
-    }
+    //     currentLED = (currentLED + 1) % 3;  // Loop between 0, 1, 2 (gets the median)
+    //   }
+    // } else {
+    //   digitalWrite(AI_LED_ONE, LOW);
+    //   digitalWrite(AI_LED_TWO, LOW);
+    //   digitalWrite(AI_LED_THREE, LOW);
+    // }
 
     Serial.print("AISuggestion: ");
     Serial.println(AISuggestion);
     playFloodWarning();
+
+    digitalWrite(AI_LED_ONE, LOW);
+    digitalWrite(AI_LED_TWO, LOW);
+    digitalWrite(AI_LED_THREE, LOW);
 
     getAISuggestion();
     lastPlayTime = millis();
