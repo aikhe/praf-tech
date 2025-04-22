@@ -47,8 +47,8 @@ const char *geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 // Create Audio object
 Audio audio;
 
-float fallback_latitude = 14.6456;
-float fallback_longitude = 121.0282;
+float fallback_latitude = 14.6571;
+float fallback_longitude = 120.9841;
 
 float latitude = 0.0;
 float longitude = 0.0;
@@ -65,7 +65,7 @@ String AISuggestion = "";
 
 // Dual timer configuration
 #define LED_HOLD_TIME 6000     // Minimum time (ms) before LED can change (debounce)
-#define LED_ON_DURATION 60000  // Time LED stays on once activated (20 seconds)
+#define LED_ON_DURATION 240000  // Time LED stays on once activated (20 seconds)
 
 unsigned long lastLedChangeTime = 0;  // For tracking LED hold time (debounce)
 unsigned long ledActivationTime = 0;  // For tracking how long LED has been active
@@ -541,7 +541,7 @@ bool getWeather() {
   HTTPClient http;
   bool success = false;
 
-  String url = "http://api.openweathermap.org/data/2.5/weather?lat=" + String(latitude, 6) + "&lon=" + String(longitude, 6) + "&appid=" + weatherApiKey + "&units=metric&lang=en";
+  String url = String("http://api.openweathermap.org/data/2.5/weather?q=Caloocan,PH&appid=") + weatherApiKey + "&units=metric&lang=en";
 
   Serial.println("Weather API URL: " + url);
   http.begin(url);
