@@ -48,7 +48,7 @@ const char *geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 const char* httpSmsApiKey = "iFqOahA-gXvOzLHlt3mHWIs5kLsqQ11FFu8QblKwxKMzDj49mLyw_dpEgMkIDFsS";
 const char* fromSmsNumber = "+639649687066";
 const char* toSmsNumber = "+639649687066";
-const char* smsMessageBody = "FLOOD ALERT! This is an automated message from your PRAF flood monitoring system.";
+const char* smsMessageBody = "ABSOLUTE CINEMA ✋😎🤚";
 
 // Create Audio object
 Audio audio;
@@ -67,7 +67,7 @@ float humidity = 0.0;
 
 String AISuggestion = "";
 
-#define TTS_GOOGLE_LANGUAGE "tl"  // "tl" for Tagalog
+#define TTS_GOOGLE_LANGUAGE "en"  // "tl" for Tagalog
 
 // Dual timer configuration
 #define LED_HOLD_TIME 6000     // Minimum time (ms) before LED can change (debounce)
@@ -90,7 +90,7 @@ const unsigned long playInterval = 440000UL;
 bool playingFirstFile = false;
 int currentAlertState = 0;
 
-#define AI_LED_ONE 2
+#define AI_LED_ONE 32
 #define AI_LED_TWO 15
 #define AI_LED_THREE 21
 
@@ -298,7 +298,7 @@ void loop() {
     
       if (sequence[i] == -1) {
         // Turn all LEDs on
-        delay(400)
+        delay(100);
         for (int j = 0; j < 3; j++) {
           digitalWrite(leds[j], HIGH);
         }
@@ -372,7 +372,7 @@ void loop() {
     
       if (sequence[i] == -1) {
         // Turn all LEDs on
-        delay(400)
+        delay(100);
         for (int j = 0; j < 3; j++) {
           digitalWrite(leds[j], HIGH);
         }
@@ -398,7 +398,7 @@ void loop() {
     }
     
     // Send SMS
-    // sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
+    sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
     Serial.print(fromSmsNumber);
     Serial.print(", ");
     Serial.print(toSmsNumber);
@@ -411,7 +411,7 @@ void loop() {
       audio.loop();
     }
 
-    delay(2000);  // debounce delay
+    delay(1200);  // debounce delay
 
     digitalWrite(AI_LED_ONE, LOW);
     digitalWrite(AI_LED_TWO, LOW);
@@ -431,7 +431,6 @@ void loop() {
       audio.connecttoFS(SD, "HIGH-ALERT.mp3");
     }
   }
-
 
   audio.loop();
 }
