@@ -287,32 +287,33 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
-    // Flash LEDs to indicate SMS sending
     int leds[] = {AI_LED_ONE, AI_LED_TWO, AI_LED_THREE};
+    int sequence[] = {0, 1, 2, 0, 1, 2, -1};  // -1 indicates "turn all LEDs on"
     
-    // Forward and backward trail (7 steps total: 0 to 2, then 2 to 0)
-    int sequence[] = {0, 1, 2, 2, 1, 0, 0};
-    
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i <= 6; i++) {
       // Turn off all LEDs
       for (int j = 0; j < 3; j++) {
         digitalWrite(leds[j], LOW);
       }
     
-      // Turn on the current LED
-      digitalWrite(leds[sequence[i]], HIGH);
+      if (sequence[i] == -1) {
+        // Turn all LEDs on
+        delay(400)
+        for (int j = 0; j < 3; j++) {
+          digitalWrite(leds[j], HIGH);
+        }
+      } else {
+        // Turn on the current LED
+        digitalWrite(leds[sequence[i]], HIGH);
+      }
+    
       delay(200);
     }
-
-    digitalWrite(AI_LED_ONE, HIGH);
-    digitalWrite(AI_LED_TWO, HIGH);
-    digitalWrite(AI_LED_THREE, HIGH);
 
     audio.connecttoFS(SD, "AI-NOTIF.mp3");
     while (audio.isRunning()) {
       audio.loop();
     }
-
 
     Serial.print("isRunning: ");
     Serial.println(isRunning);
@@ -360,30 +361,29 @@ void loop() {
   if (digitalRead(BTTN_SMS) == LOW) {
     Serial.println("SMS button pressed!");
     
-    for (int i = 0; i < 6; i++) {
-      digitalWrite(AI_LED_ONE, LOW);
-      digitalWrite(AI_LED_TWO, LOW);
-      digitalWrite(AI_LED_THREE, LOW);
+    int leds[] = {AI_LED_ONE, AI_LED_TWO, AI_LED_THREE};
+    int sequence[] = {0, 1, 2, 0, 1, 2, -1};  // -1 indicates "turn all LEDs on"
     
-      if (i == 0 || i == 3) {
-        digitalWrite(AI_LED_ONE, HIGH);
-      } else if (i == 1 || i == 4) {
-        digitalWrite(AI_LED_TWO, HIGH);
-      } else if (i == 2 || i == 5) {
-        digitalWrite(AI_LED_THREE, HIGH);
-      } else if (i == 6) {
-        digitalWrite(AI_LED_ONE, LOW);
-        digitalWrite(AI_LED_TWO, LOW);
-        digitalWrite(AI_LED_THREE, LOW);
+    for (int i = 0; i <= 6; i++) {
+      // Turn off all LEDs
+      for (int j = 0; j < 3; j++) {
+        digitalWrite(leds[j], LOW);
+      }
+    
+      if (sequence[i] == -1) {
+        // Turn all LEDs on
+        delay(400)
+        for (int j = 0; j < 3; j++) {
+          digitalWrite(leds[j], HIGH);
+        }
+      } else {
+        // Turn on the current LED
+        digitalWrite(leds[sequence[i]], HIGH);
       }
     
       delay(200);
     }
 
-    digitalWrite(AI_LED_ONE, HIGH);
-    digitalWrite(AI_LED_TWO, HIGH);
-    digitalWrite(AI_LED_THREE, HIGH);
-    
     // Create alert message based on current alert state
     String alertMessage = "FLOOD ALERT! ";
     
@@ -411,11 +411,11 @@ void loop() {
       audio.loop();
     }
 
+    delay(2000);  // debounce delay
+
     digitalWrite(AI_LED_ONE, LOW);
     digitalWrite(AI_LED_TWO, LOW);
     digitalWrite(AI_LED_THREE, LOW);
-    
-    delay(1000);  // debounce delay
   }
 
   // Check if first file is done playing and we need to play the alert
