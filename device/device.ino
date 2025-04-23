@@ -33,7 +33,7 @@
 
 // Button
 #define BTTN_AI 4
-#define BTTN_SMS 35
+#define BTTN_SMS 22
 
 // Supabase
 #define supabaseUrl "https://jursmglsfqaqrxvirtiw.supabase.co"
@@ -43,6 +43,12 @@
 // AI suggestions using Gemini AI
 const char *weatherApiKey = "7970309436bc52d518c7e71e314b8053";
 const char *geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
+
+// HttpSMS API credentials
+const char* httpSmsApiKey = "iFqOahA-gXvOzLHlt3mHWIs5kLsqQ11FFu8QblKwxKMzDj49mLyw_dpEgMkIDFsS";
+const char* fromSmsNumber = "+639649687066";
+const char* toSmsNumber = "+639649687066";
+const char* smsMessageBody = "FLOOD ALERT! This is an automated message from your PRAF flood monitoring system.";
 
 // Create Audio object
 Audio audio;
@@ -65,7 +71,7 @@ String AISuggestion = "";
 
 // Dual timer configuration
 #define LED_HOLD_TIME 6000     // Minimum time (ms) before LED can change (debounce)
-#define LED_ON_DURATION 240000  // Time LED stays on once activated (20 seconds)
+#define LED_ON_DURATION 60000  // Time LED stays on once activated (20 seconds)
 
 unsigned long lastLedChangeTime = 0;  // For tracking LED hold time (debounce)
 unsigned long ledActivationTime = 0;  // For tracking how long LED has been active
@@ -281,6 +287,23 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
+    // Flash LEDs to indicate SMS sending
+    int leds[] = {AI_LED_ONE, AI_LED_TWO, AI_LED_THREE};
+    
+    // Forward and backward trail (7 steps total: 0 to 2, then 2 to 0)
+    int sequence[] = {0, 1, 2, 2, 1, 0, 0};
+    
+    for (int i = 0; i < 7; i++) {
+      // Turn off all LEDs
+      for (int j = 0; j < 3; j++) {
+        digitalWrite(leds[j], LOW);
+      }
+    
+      // Turn on the current LED
+      digitalWrite(leds[sequence[i]], HIGH);
+      delay(200);
+    }
+
     digitalWrite(AI_LED_ONE, HIGH);
     digitalWrite(AI_LED_TWO, HIGH);
     digitalWrite(AI_LED_THREE, HIGH);
@@ -334,6 +357,67 @@ void loop() {
     delay(1000);  // debounce delay
   }
 
+  if (digitalRead(BTTN_SMS) == LOW) {
+    Serial.println("SMS button pressed!");
+    
+    for (int i = 0; i < 6; i++) {
+      digitalWrite(AI_LED_ONE, LOW);
+      digitalWrite(AI_LED_TWO, LOW);
+      digitalWrite(AI_LED_THREE, LOW);
+    
+      if (i == 0 || i == 3) {
+        digitalWrite(AI_LED_ONE, HIGH);
+      } else if (i == 1 || i == 4) {
+        digitalWrite(AI_LED_TWO, HIGH);
+      } else if (i == 2 || i == 5) {
+        digitalWrite(AI_LED_THREE, HIGH);
+      } else if (i == 6) {
+        digitalWrite(AI_LED_ONE, LOW);
+        digitalWrite(AI_LED_TWO, LOW);
+        digitalWrite(AI_LED_THREE, LOW);
+      }
+    
+      delay(200);
+    }
+
+    digitalWrite(AI_LED_ONE, HIGH);
+    digitalWrite(AI_LED_TWO, HIGH);
+    digitalWrite(AI_LED_THREE, HIGH);
+    
+    // Create alert message based on current alert state
+    String alertMessage = "FLOOD ALERT! ";
+    
+    if (currentLedState == 1) {
+      alertMessage += "LOW FLOOD RISK detected by your PRAF monitoring system.";
+    } else if (currentLedState == 2) {
+      alertMessage += "MEDIUM FLOOD RISK detected by your PRAF monitoring system.";
+    } else if (currentLedState == 3) {
+      alertMessage += "HIGH FLOOD RISK detected! EVACUATE IMMEDIATELY! From your PRAF monitoring system.";
+    } else {
+      alertMessage += "This is a test message from your PRAF flood monitoring system.";
+    }
+    
+    // Send SMS
+    // sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
+    Serial.print(fromSmsNumber);
+    Serial.print(", ");
+    Serial.print(toSmsNumber);
+    Serial.print(", ");
+    Serial.println(alertMessage);
+    
+    // Play confirmation sound
+    audio.connecttoFS(SD, "SMS-SENT.mp3");
+    while (audio.isRunning()) {
+      audio.loop();
+    }
+
+    digitalWrite(AI_LED_ONE, LOW);
+    digitalWrite(AI_LED_TWO, LOW);
+    digitalWrite(AI_LED_THREE, LOW);
+    
+    delay(1000);  // debounce delay
+  }
+
   // Check if first file is done playing and we need to play the alert
   if (playingFirstFile && !audio.isRunning()) {
     playingFirstFile = false;
@@ -350,6 +434,53 @@ void loop() {
 
 
   audio.loop();
+}
+
+void sendHttpSMS(const char* from, const char* to, const char* body) {
+  Serial.println("Preparing to send SMS...");
+  
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  if (!client.connect("api.httpsms.com", 443)) {
+    Serial.println("Connection to HttpSMS API failed");
+    return;
+  }
+  
+  // Create JSON payload
+  DynamicJsonDocument doc(1024);
+  doc["content"] = body;
+  doc["from"] = from;
+  doc["to"] = to;
+  
+  String jsonPayload;
+  serializeJson(doc, jsonPayload);
+  
+  // Send POST request
+  client.println("POST /v1/messages/send HTTP/1.1");
+  client.println("Host: api.httpsms.com");
+  client.print("x-api-key: ");
+  client.println(httpSmsApiKey);
+  client.println("Content-Type: application/json");
+  client.print("Content-Length: ");
+  client.println(jsonPayload.length());
+  client.println("Connection: close");
+  client.println();
+  client.println(jsonPayload);
+  
+  Serial.println("SMS Request sent!");
+  
+  // Read and print the response
+  Serial.println("Reading SMS API response:");
+  while (client.connected() || client.available()) {
+    if (client.available()) {
+      String line = client.readStringUntil('\n');
+      Serial.println(line);
+    }
+  }
+  
+  client.stop();
+  Serial.println("SMS Connection closed");
 }
 
 // 🔊 Speak in smart chunks
