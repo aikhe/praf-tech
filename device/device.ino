@@ -7,6 +7,7 @@
 #include "SD.h"
 #include "FS.h"
 #include "SPI.h"
+#include <vector>
 
 // Wifi
 #define SSID "TK-gacura"
@@ -41,14 +42,13 @@
 #define tableName "resident_number"
 
 // AI suggestions using Gemini AI
-const char *weatherApiKey = "7970309436bc52d518c7e71e314b8053";
-const char *geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
+const char* weatherApiKey = "7970309436bc52d518c7e71e314b8053";
+const char* geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 
 // HttpSMS API credentials
 const char* httpSmsApiKey = "iFqOahA-gXvOzLHlt3mHWIs5kLsqQ11FFu8QblKwxKMzDj49mLyw_dpEgMkIDFsS";
 const char* fromSmsNumber = "+639649687066";
 const char* toSmsNumber = "+639649687066";
-const char* smsMessageBody = "ABSOLUTE CINEMA ✋😎🤚";
 
 // Create Audio object
 Audio audio;
@@ -67,7 +67,7 @@ float humidity = 0.0;
 
 String AISuggestion = "";
 
-#define TTS_GOOGLE_LANGUAGE "en"  // "tl" for Tagalog
+#define TTS_GOOGLE_LANGUAGE "tl"  // "tl" for Tagalog
 
 // Dual timer configuration
 #define LED_HOLD_TIME 6000     // Minimum time (ms) before LED can change (debounce)
@@ -102,6 +102,11 @@ bool isRunning = false;
 unsigned long previousMillis = 0;
 unsigned long interval = 300;
 int currentLED = 0;
+
+// Variables to track database state
+std::vector<int> knownIds;
+unsigned long lastCheckTime = 0;
+const unsigned long checkInterval = 10000; // Check every 10 seconds
 
 void setup() {
   Serial.begin(115200);
@@ -287,15 +292,15 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
-    int leds[] = {AI_LED_ONE, AI_LED_TWO, AI_LED_THREE};
-    int sequence[] = {0, 1, 2, 0, 1, 2, -1};  // -1 indicates "turn all LEDs on"
-    
+    int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
+    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
+
     for (int i = 0; i <= 6; i++) {
       // Turn off all LEDs
       for (int j = 0; j < 3; j++) {
         digitalWrite(leds[j], LOW);
       }
-    
+
       if (sequence[i] == -1) {
         // Turn all LEDs on
         delay(100);
@@ -306,7 +311,7 @@ void loop() {
         // Turn on the current LED
         digitalWrite(leds[sequence[i]], HIGH);
       }
-    
+
       delay(200);
     }
 
@@ -360,16 +365,16 @@ void loop() {
 
   if (digitalRead(BTTN_SMS) == LOW) {
     Serial.println("SMS button pressed!");
-    
-    int leds[] = {AI_LED_ONE, AI_LED_TWO, AI_LED_THREE};
-    int sequence[] = {0, 1, 2, 0, 1, 2, -1};  // -1 indicates "turn all LEDs on"
-    
+
+    int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
+    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
+
     for (int i = 0; i <= 6; i++) {
       // Turn off all LEDs
       for (int j = 0; j < 3; j++) {
         digitalWrite(leds[j], LOW);
       }
-    
+
       if (sequence[i] == -1) {
         // Turn all LEDs on
         delay(100);
@@ -380,13 +385,13 @@ void loop() {
         // Turn on the current LED
         digitalWrite(leds[sequence[i]], HIGH);
       }
-    
+
       delay(200);
     }
 
     // Create alert message based on current alert state
     String alertMessage = "FLOOD ALERT! ";
-    
+
     if (currentLedState == 1) {
       alertMessage += "LOW FLOOD RISK detected by your PRAF monitoring system.";
     } else if (currentLedState == 2) {
@@ -396,7 +401,7 @@ void loop() {
     } else {
       alertMessage += "This is a test message from your PRAF flood monitoring system.";
     }
-    
+
     // Send SMS
     sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
     Serial.print(fromSmsNumber);
@@ -404,7 +409,7 @@ void loop() {
     Serial.print(toSmsNumber);
     Serial.print(", ");
     Serial.println(alertMessage);
-    
+
     // Play confirmation sound
     audio.connecttoFS(SD, "SMS-SENT.mp3");
     while (audio.isRunning()) {
@@ -432,29 +437,36 @@ void loop() {
     }
   }
 
+  // Inside your loop() function, add this:
+  if (currentTime - lastCheckTime >= checkInterval && !audio.isRunning()) {
+    lastCheckTime = currentTime;
+    getNumbers(); // Check for new database entries
+  }
+
   audio.loop();
 }
 
+
 void sendHttpSMS(const char* from, const char* to, const char* body) {
   Serial.println("Preparing to send SMS...");
-  
+
   WiFiClientSecure client;
   client.setInsecure();
-  
+
   if (!client.connect("api.httpsms.com", 443)) {
     Serial.println("Connection to HttpSMS API failed");
     return;
   }
-  
+
   // Create JSON payload
   DynamicJsonDocument doc(1024);
   doc["content"] = body;
   doc["from"] = from;
   doc["to"] = to;
-  
+
   String jsonPayload;
   serializeJson(doc, jsonPayload);
-  
+
   // Send POST request
   client.println("POST /v1/messages/send HTTP/1.1");
   client.println("Host: api.httpsms.com");
@@ -466,9 +478,9 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
   client.println("Connection: close");
   client.println();
   client.println(jsonPayload);
-  
+
   Serial.println("SMS Request sent!");
-  
+
   // Read and print the response
   Serial.println("Reading SMS API response:");
   while (client.connected() || client.available()) {
@@ -477,7 +489,7 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
       Serial.println(line);
     }
   }
-  
+
   client.stop();
   Serial.println("SMS Connection closed");
 }
@@ -760,7 +772,7 @@ void getAISuggestion() {
   prompt += "- If flooding is unlikely, suggest a safe way to deal with the weather while reassuring them.\n";
   prompt += "- Maintain a formal tone and avoid AI-like phrasing.\n";
   prompt += "- Do not use uncertain words like \"naman.\"\n";
-  prompt += "- And most importantly use taglish a mix of english and tagalog.\n";
+  prompt += "- And most importantly mainly use tagalog.\n";
   prompt += "- Structure:\n";
   prompt += "  1. Start with the flood update.\n";
   prompt += "  2. Then, provide the weather update.\n";
@@ -818,30 +830,103 @@ void getAISuggestion() {
 
 void getNumbers() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected. Attempting to reconnect...");
-    while (!WiFi.reconnect()) {
-      Serial.println("Reconnecting to WiFi...");
-      delay(500);
-    }
-    Serial.println("WiFi reconnected.");
+    reconnectWiFi();
   }
+
   HTTPClient http;
-  String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName + "?id=eq.1";
+  String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName;
+  
   http.begin(endpoint);
   http.addHeader("apikey", supabaseKey);
   http.addHeader("Authorization", "Bearer " + String(supabaseKey));
+  http.addHeader("Content-Type", "application/json");
+  
   int httpResponseCode = http.GET();
-  if (httpResponseCode > 0) {
-    Serial.println("\nReceiving:");
+  
+  if (httpResponseCode == 200) {
     String response = http.getString();
-    Serial.println("HTTP Response code: " + String(httpResponseCode));
-    Serial.println("Response: " + response);
+    Serial.println("Database entries received:");
+    
+    // Parse JSON response
+    DynamicJsonDocument doc(2048);
+    DeserializationError error = deserializeJson(doc, response);
+    
+    if (error) {
+      Serial.print("JSON deserialization failed: ");
+      Serial.println(error.c_str());
+    } else {
+      // Process entries and check for new ones
+      JsonArray array = doc.as<JsonArray>();
+      
+      bool foundNewEntries = false;
+      
+      Serial.print("Found ");
+      Serial.print(array.size());
+      Serial.println(" entries.");
+      
+      for (JsonVariant entry : array) {
+        int id = entry["id"];
+        
+        // Check if this ID is new
+        bool isNewId = true;
+        for (int knownId : knownIds) {
+          if (id == knownId) {
+            isNewId = false;
+            break;
+          }
+        }
+        
+        // If it's a new ID, process it
+        if (isNewId) {
+          if (!foundNewEntries) {
+            digitalWrite(AI_LED_ONE, HIGH);
+            digitalWrite(AI_LED_TWO, HIGH);
+            digitalWrite(AI_LED_THREE, HIGH);
+
+            Serial.println("\n=== New Entries Detected! ===");
+            foundNewEntries = true;
+          }
+          
+          String number = entry["number"].as<String>();
+          
+          Serial.print("New Entry - ID: ");
+          Serial.print(id);
+          Serial.print(", Number: ");
+          Serial.println(number);
+          
+          // Add to our known IDs
+          knownIds.push_back(id);
+          
+          // Here you can add any action you want to take when a new number is added
+          // For example, play a notification sound or send an SMS
+        }
+      }
+      
+      if (foundNewEntries) {
+        Serial.println("============================\n");
+      }
+
+      delay(2000);
+
+      digitalWrite(AI_LED_ONE, LOW);
+      digitalWrite(AI_LED_TWO, LOW);
+      digitalWrite(AI_LED_THREE, LOW);
+    }
   } else {
-    Serial.println("Error in HTTP request");
-    Serial.println("HTTP Response code: " + String(httpResponseCode));
+    Serial.print("Error getting entries. HTTP Response code: ");
+    Serial.println(httpResponseCode);
     String response = http.getString();
     Serial.println("Response: " + response);
   }
+  
   http.end();
-  Serial.println("\n============================================\n");
+}
+
+void reconnectWiFi() {
+  Serial.println("WiFi not connected. Attempting to reconnect...");
+  while (!WiFi.reconnect()) {
+    Serial.println("Reconnecting to WiFi...");
+    delay(500);
+  }
+  Serial.println("WiFi reconnected.");
 }
