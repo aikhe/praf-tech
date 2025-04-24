@@ -108,6 +108,8 @@ std::vector<int> knownIds;
 unsigned long lastCheckTime = 0;
 const unsigned long checkInterval = 10000; // Check every 10 seconds
 
+std::vector<String> registeredPhoneNumbers;
+
 void setup() {
   Serial.begin(115200);
   WiFi.begin(SSID, PASSWORD);
@@ -391,7 +393,7 @@ void loop() {
 
     // Create alert message based on current alert state
     String alertMessage = "FLOOD ALERT! ";
-
+    
     if (currentLedState == 1) {
       alertMessage += "LOW FLOOD RISK detected by your PRAF monitoring system.";
     } else if (currentLedState == 2) {
@@ -401,14 +403,21 @@ void loop() {
     } else {
       alertMessage += "This is a test message from your PRAF flood monitoring system.";
     }
-
-    // Send SMS
-    sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
-    Serial.print(fromSmsNumber);
-    Serial.print(", ");
-    Serial.print(toSmsNumber);
-    Serial.print(", ");
-    Serial.println(alertMessage);
+    
+    // Send SMS to all registered numbers
+    if (registeredPhoneNumbers.size() > 0) {
+      Serial.println("Sending SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
+      
+      for (String toNumber : registeredPhoneNumbers) {
+        sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
+        Serial.println("SMS sent to: " + toNumber);
+        delay(300); // Small delay between sending messages
+      }
+    } else {
+      // Use the default number if no registered numbers
+      sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
+      Serial.println("SMS sent to default number: " + String(toSmsNumber));
+    }
 
     // Play confirmation sound
     audio.connecttoFS(SD, "SMS-SENT.mp3");
@@ -441,6 +450,10 @@ void loop() {
   if (currentTime - lastCheckTime >= checkInterval && !audio.isRunning()) {
     lastCheckTime = currentTime;
     getNumbers(); // Check for new database entries
+    Serial.println("Registered phone numbers:");
+    for (const String& number : registeredPhoneNumbers) {
+      Serial.println(number);
+    }
   }
 
   audio.loop();
@@ -833,6 +846,9 @@ void getNumbers() {
     reconnectWiFi();
   }
 
+  // Clear the existing phone numbers array
+  registeredPhoneNumbers.clear();
+  
   HTTPClient http;
   String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName;
   
@@ -845,7 +861,6 @@ void getNumbers() {
   
   if (httpResponseCode == 200) {
     String response = http.getString();
-    Serial.println("Database entries received:");
     
     // Parse JSON response
     DynamicJsonDocument doc(2048);
@@ -855,19 +870,21 @@ void getNumbers() {
       Serial.print("JSON deserialization failed: ");
       Serial.println(error.c_str());
     } else {
-      // Process entries and check for new ones
       JsonArray array = doc.as<JsonArray>();
-      
-      bool foundNewEntries = false;
+
       
       Serial.print("Found ");
       Serial.print(array.size());
-      Serial.println(" entries.");
+      Serial.println(" phone numbers.");
       
       for (JsonVariant entry : array) {
         int id = entry["id"];
+        String number = entry["number"].as<String>();
         
-        // Check if this ID is new
+        // Add number to our array
+        registeredPhoneNumbers.push_back(number);
+        
+        // Add ID to our known IDs list if not already there
         bool isNewId = true;
         for (int knownId : knownIds) {
           if (id == knownId) {
@@ -876,47 +893,29 @@ void getNumbers() {
           }
         }
         
-        // If it's a new ID, process it
         if (isNewId) {
-          if (!foundNewEntries) {
-            digitalWrite(AI_LED_ONE, HIGH);
-            digitalWrite(AI_LED_TWO, HIGH);
-            digitalWrite(AI_LED_THREE, HIGH);
+          digitalWrite(AI_LED_ONE, HIGH);
+          digitalWrite(AI_LED_TWO, HIGH);
+          digitalWrite(AI_LED_THREE, HIGH);
 
-            Serial.println("\n=== New Entries Detected! ===");
-            foundNewEntries = true;
-          }
-          
-          String number = entry["number"].as<String>();
-          
-          Serial.print("New Entry - ID: ");
-          Serial.print(id);
-          Serial.print(", Number: ");
-          Serial.println(number);
-          
-          // Add to our known IDs
           knownIds.push_back(id);
-          
-          // Here you can add any action you want to take when a new number is added
-          // For example, play a notification sound or send an SMS
+          Serial.print("New Number Added: ");
+          Serial.println(number);
+
+          delay(1500);
+
+          digitalWrite(AI_LED_ONE, LOW);
+          digitalWrite(AI_LED_TWO, LOW);
+          digitalWrite(AI_LED_THREE, LOW);
         }
       }
       
-      if (foundNewEntries) {
-        Serial.println("============================\n");
-      }
-
-      delay(2000);
-
-      digitalWrite(AI_LED_ONE, LOW);
-      digitalWrite(AI_LED_TWO, LOW);
-      digitalWrite(AI_LED_THREE, LOW);
+      Serial.print("Total registered numbers: ");
+      Serial.println(registeredPhoneNumbers.size());
     }
   } else {
     Serial.print("Error getting entries. HTTP Response code: ");
     Serial.println(httpResponseCode);
-    String response = http.getString();
-    Serial.println("Response: " + response);
   }
   
   http.end();
