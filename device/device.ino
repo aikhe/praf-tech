@@ -324,33 +324,6 @@ void loop() {
 
     Serial.print("isRunning: ");
     Serial.println(isRunning);
-    // if (isRunning) {
-    //   unsigned long currentMillis = millis();
-
-    //   if (currentMillis - previousMillis >= interval) {
-    //     previousMillis = currentMillis;  // update previousMills state
-
-    //     if (currentLED == 0) {
-    //       digitalWrite(AI_LED_ONE, HIGH);
-    //       digitalWrite(AI_LED_TWO, LOW);
-    //       digitalWrite(AI_LED_THREE, LOW);
-    //     } else if (currentLED == 1) {
-    //       digitalWrite(AI_LED_ONE, LOW);
-    //       digitalWrite(AI_LED_TWO, HIGH);
-    //       digitalWrite(AI_LED_THREE, LOW);
-    //     } else if (currentLED == 2) {
-    //       digitalWrite(AI_LED_ONE, LOW);
-    //       digitalWrite(AI_LED_TWO, LOW);
-    //       digitalWrite(AI_LED_THREE, HIGH);
-    //     }
-
-    //     currentLED = (currentLED + 1) % 3;  // Loop between 0, 1, 2 (gets the median)
-    //   }
-    // } else {
-    //   digitalWrite(AI_LED_ONE, LOW);
-    //   digitalWrite(AI_LED_TWO, LOW);
-    //   digitalWrite(AI_LED_THREE, LOW);
-    // }
 
     Serial.print("AISuggestion: ");
     Serial.println(AISuggestion);
