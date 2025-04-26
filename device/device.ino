@@ -106,7 +106,7 @@ int currentLED = 0;
 // Variables to track database state
 std::vector<int> knownIds;
 unsigned long lastCheckTime = 0;
-const unsigned long checkInterval = 10000; // Check every 10 seconds
+const unsigned long checkInterval = 10000;  // Check every 10 seconds
 
 std::vector<String> registeredPhoneNumbers;
 
@@ -294,44 +294,55 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
+    // Start playing notification sound immediately
+    audio.connecttoFS(SD, "AI-NOTIF.mp3");
+
+    // Use millis() for non-blocking LED sequence
+    unsigned long ledSequenceStart = millis();
+    int currentSequenceStep = 0;
     int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
     int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
 
-    for (int i = 0; i <= 6; i++) {
-      // Turn off all LEDs
-      for (int j = 0; j < 3; j++) {
-        digitalWrite(leds[j], LOW);
-      }
-
-      if (sequence[i] == -1) {
-        // Turn all LEDs on
-        delay(100);
-        for (int j = 0; j < 3; j++) {
-          digitalWrite(leds[j], HIGH);
-        }
-      } else {
-        // Turn on the current LED
-        digitalWrite(leds[sequence[i]], HIGH);
-      }
-
-      delay(200);
-    }
-
-    audio.connecttoFS(SD, "AI-NOTIF.mp3");
+    // Run LED sequence while audio is playing
     while (audio.isRunning()) {
-      audio.loop();
+      audio.loop();  // Keep audio processing running
+
+      // Control LED sequence using time-based approach
+      unsigned long currentTime = millis();
+      int stepIndex = (currentTime - ledSequenceStart) / 200;  // 200ms per step
+
+      if (stepIndex <= 6 && stepIndex != currentSequenceStep) {
+        currentSequenceStep = stepIndex;
+
+        // Turn off all LEDs first
+        for (int j = 0; j < 3; j++) {
+          digitalWrite(leds[j], LOW);
+        }
+
+        // Apply the current sequence step
+        if (sequence[stepIndex] == -1) {
+          // Turn all LEDs on
+          for (int j = 0; j < 3; j++) {
+            digitalWrite(leds[j], HIGH);
+          }
+        } else if (stepIndex <= 5) {
+          // Turn on the current LED
+          digitalWrite(leds[sequence[stepIndex]], HIGH);
+        }
+      }
     }
 
     Serial.print("isRunning: ");
     Serial.println(isRunning);
-
     Serial.print("AISuggestion: ");
     Serial.println(AISuggestion);
+
     playFloodWarning();
 
-    digitalWrite(AI_LED_ONE, LOW);
-    digitalWrite(AI_LED_TWO, LOW);
-    digitalWrite(AI_LED_THREE, LOW);
+    // Turn off all LEDs before proceeding
+    for (int j = 0; j < 3; j++) {
+      digitalWrite(leds[j], LOW);
+    }
 
     getAISuggestion();
     lastPlayTime = millis();
@@ -366,7 +377,7 @@ void loop() {
 
     // Create alert message based on current alert state
     String alertMessage = "FLOOD ALERT! ";
-    
+
     if (currentLedState == 1) {
       alertMessage += "LOW FLOOD RISK detected by your PRAF monitoring system.";
     } else if (currentLedState == 2) {
@@ -376,19 +387,19 @@ void loop() {
     } else {
       alertMessage += "This is a test message from your PRAF flood monitoring system.";
     }
-    
+
     // Send SMS to all registered numbers
     if (registeredPhoneNumbers.size() > 0) {
       Serial.println("Sending SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
-      
+
       for (String toNumber : registeredPhoneNumbers) {
-        sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
+        // sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
         Serial.println("SMS sent to: " + toNumber);
-        delay(300); // Small delay between sending messages
+        delay(300);  // Small delay between sending messages
       }
     } else {
       // Use the default number if no registered numbers
-      sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
+      // sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
       Serial.println("SMS sent to default number: " + String(toSmsNumber));
     }
 
@@ -422,7 +433,7 @@ void loop() {
   // Inside your loop() function, add this:
   if (currentTime - lastCheckTime >= checkInterval && !audio.isRunning()) {
     lastCheckTime = currentTime;
-    getNumbers(); // Check for new database entries
+    getNumbers();  // Check for new database entries
     Serial.println("Registered phone numbers:");
     for (const String& number : registeredPhoneNumbers) {
       Serial.println(number);
@@ -821,42 +832,42 @@ void getNumbers() {
 
   // Clear the existing phone numbers array
   registeredPhoneNumbers.clear();
-  
+
   HTTPClient http;
   String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName;
-  
+
   http.begin(endpoint);
   http.addHeader("apikey", supabaseKey);
   http.addHeader("Authorization", "Bearer " + String(supabaseKey));
   http.addHeader("Content-Type", "application/json");
-  
+
   int httpResponseCode = http.GET();
-  
+
   if (httpResponseCode == 200) {
     String response = http.getString();
-    
+
     // Parse JSON response
     DynamicJsonDocument doc(2048);
     DeserializationError error = deserializeJson(doc, response);
-    
+
     if (error) {
       Serial.print("JSON deserialization failed: ");
       Serial.println(error.c_str());
     } else {
       JsonArray array = doc.as<JsonArray>();
 
-      
+
       Serial.print("Found ");
       Serial.print(array.size());
       Serial.println(" phone numbers.");
-      
+
       for (JsonVariant entry : array) {
         int id = entry["id"];
         String number = entry["number"].as<String>();
-        
+
         // Add number to our array
         registeredPhoneNumbers.push_back(number);
-        
+
         // Add ID to our known IDs list if not already there
         bool isNewId = true;
         for (int knownId : knownIds) {
@@ -865,7 +876,7 @@ void getNumbers() {
             break;
           }
         }
-        
+
         if (isNewId) {
           digitalWrite(AI_LED_ONE, HIGH);
           digitalWrite(AI_LED_TWO, HIGH);
@@ -882,7 +893,7 @@ void getNumbers() {
           digitalWrite(AI_LED_THREE, LOW);
         }
       }
-      
+
       Serial.print("Total registered numbers: ");
       Serial.println(registeredPhoneNumbers.size());
     }
@@ -890,7 +901,7 @@ void getNumbers() {
     Serial.print("Error getting entries. HTTP Response code: ");
     Serial.println(httpResponseCode);
   }
-  
+
   http.end();
 }
 
