@@ -297,37 +297,41 @@ void loop() {
     // Start playing notification sound immediately
     audio.connecttoFS(SD, "AI-NOTIF.mp3");
 
-    // Use millis() for non-blocking LED sequence
-    unsigned long ledSequenceStart = millis();
-    int currentSequenceStep = 0;
+    // Define sequence
     int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
-    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
+    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 = all LEDs on
+    int currentStep = 0;
+    unsigned long previousStepTime = millis();
+    const long stepInterval = 200;
 
     // Run LED sequence while audio is playing
-    while (audio.isRunning()) {
-      audio.loop();  // Keep audio processing running
+    while (audio.isRunning() || currentStep < 7) {
+      if (audio.isRunning()) {
+        audio.loop();
+      }
 
-      // Control LED sequence using time-based approach
       unsigned long currentTime = millis();
-      int stepIndex = (currentTime - ledSequenceStart) / 200;  // 200ms per step
+      if (currentTime - previousStepTime >= stepInterval) {
+        previousStepTime = currentTime;
 
-      if (stepIndex <= 6 && stepIndex != currentSequenceStep) {
-        currentSequenceStep = stepIndex;
-
-        // Turn off all LEDs first
-        for (int j = 0; j < 3; j++) {
-          digitalWrite(leds[j], LOW);
+        // Turn off all LEDs before applying the next step
+        if (currentStep < 7) {
+          for (int j = 0; j < 3; j++) {
+            digitalWrite(leds[j], LOW);
+          }
         }
 
-        // Apply the current sequence step
-        if (sequence[stepIndex] == -1) {
-          // Turn all LEDs on
-          for (int j = 0; j < 3; j++) {
-            digitalWrite(leds[j], HIGH);
+        if (currentStep < 7) {
+          if (sequence[currentStep] == -1) {
+            // Turn all LEDs ON
+            delay(200);
+            for (int j = 0; j < 3; j++) {
+              digitalWrite(leds[j], HIGH);
+            }
+          } else {
+            digitalWrite(leds[sequence[currentStep]], HIGH);
           }
-        } else if (stepIndex <= 5) {
-          // Turn on the current LED
-          digitalWrite(leds[sequence[stepIndex]], HIGH);
+          currentStep++;
         }
       }
     }
@@ -337,14 +341,17 @@ void loop() {
     Serial.print("AISuggestion: ");
     Serial.println(AISuggestion);
 
-    playFloodWarning();
+    // LEDs REMAIN ON here...
 
-    // Turn off all LEDs before proceeding
-    for (int j = 0; j < 3; j++) {
-      digitalWrite(leds[j], LOW);
-    }
+    playFloodWarning();  // Optional sound or alert before AI suggestion
 
-    getAISuggestion();
+    // NOW turn off all LEDs after AI suggestion is done
+    digitalWrite(AI_LED_ONE, LOW);
+    digitalWrite(AI_LED_TWO, LOW);
+    digitalWrite(AI_LED_THREE, LOW);
+
+    getAISuggestion();  // This might take time — LEDs stay on through it
+
     lastPlayTime = millis();
     delay(1000);  // debounce delay
   }
@@ -352,27 +359,46 @@ void loop() {
   if (digitalRead(BTTN_SMS) == LOW) {
     Serial.println("SMS button pressed!");
 
+    // Start playing notification sound immediately
+    audio.connecttoFS(SD, "SMS-SENT.mp3");
+
+    // Define sequence
     int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
-    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
+    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 = all LEDs on
+    int currentStep = 0;
+    unsigned long previousStepTime = millis();
+    const long stepInterval = 200;
 
-    for (int i = 0; i <= 6; i++) {
-      // Turn off all LEDs
-      for (int j = 0; j < 3; j++) {
-        digitalWrite(leds[j], LOW);
+    // Run LED sequence while audio is playing
+    while (audio.isRunning() || currentStep < 7) {
+      if (audio.isRunning()) {
+        audio.loop();
       }
 
-      if (sequence[i] == -1) {
-        // Turn all LEDs on
-        delay(100);
-        for (int j = 0; j < 3; j++) {
-          digitalWrite(leds[j], HIGH);
+      unsigned long currentTime = millis();
+      if (currentTime - previousStepTime >= stepInterval) {
+        previousStepTime = currentTime;
+
+        // Turn off all LEDs before applying the next step
+        if (currentStep < 7) {
+          for (int j = 0; j < 3; j++) {
+            digitalWrite(leds[j], LOW);
+          }
         }
-      } else {
-        // Turn on the current LED
-        digitalWrite(leds[sequence[i]], HIGH);
-      }
 
-      delay(200);
+        if (currentStep < 7) {
+          if (sequence[currentStep] == -1) {
+            // Turn all LEDs ON
+            delay(200);
+            for (int j = 0; j < 3; j++) {
+              digitalWrite(leds[j], HIGH);
+            }
+          } else {
+            digitalWrite(leds[sequence[currentStep]], HIGH);
+          }
+          currentStep++;
+        }
+      }
     }
 
     // Create alert message based on current alert state
