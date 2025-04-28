@@ -47,8 +47,6 @@ const char* geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 
 // HttpSMS API credentials
 const char* httpSmsApiKey = "iFqOahA-gXvOzLHlt3mHWIs5kLsqQ11FFu8QblKwxKMzDj49mLyw_dpEgMkIDFsS";
-const char* fromSmsNumber = "+639649687066";
-const char* toSmsNumber = "+639649687066";
 
 // Create Audio object
 Audio audio;
@@ -118,6 +116,8 @@ bool isSendingSMS = false;
 unsigned long lastSMSTime = 0;
 int currentSMSIndex = 0;
 String currentSMSMessage = "";
+
+const char* fromSmsNumber = "+639649687066";
 
 void setup() {
   Serial.begin(115200);
