@@ -211,12 +211,12 @@ void loop() {
   long duration = pulseIn(ECHO_PIN, HIGH);
   float distance = duration / 58.773;
 
-  Serial.print("Raw duration: ");
-  Serial.print(duration);
-  Serial.print(" μs");
-  Serial.print(" Distance: ");
-  Serial.print(distance);
-  Serial.println(" cm");
+  // Serial.print("Raw duration: ");
+  // Serial.print(duration);
+  // Serial.print(" μs");
+  // Serial.print(" Distance: ");
+  // Serial.print(distance);
+  // Serial.println(" cm");
 
   // Only process sensor alerts if audio is not playing
   if (!isAudioPlaying) {
