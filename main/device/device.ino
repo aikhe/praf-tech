@@ -93,7 +93,7 @@ int currentAlertState = 0;
 
 #define AI_LED_ONE 32
 #define AI_LED_TWO 15
-#define AI_LED_THREE 21
+#define AI_LED_THREE 33
 
 int buttonState = 0;
 int lastButtonState = HIGH;
