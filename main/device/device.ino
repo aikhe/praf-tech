@@ -160,7 +160,6 @@ void setup() {
     Serial.println(WiFi.localIP());
 
     // Test Supabase connection
-    testSupabaseConnection();
 
     latitude = fallback_latitude;
     longitude = fallback_longitude;
@@ -492,14 +491,21 @@ void loop() {
           delay(200);
         }
 
+        // Update weather and AI suggestion to get the latest data
+        if (WiFi.status() == WL_CONNECTED) {
+          getWeather();
+          getAISuggestion();
+        }
+
         // Play confirmation sound
         audio.connecttoFS(SD, "SMS-SENT-VOICE.mp3");
         while (audio.isRunning()) {
           audio.loop();
         }
 
-        // Create weather update message
-        String weatherMessage = "📱 PRAF WEATHER UPDATE 📱\n\n";
+        // Create weather update message in the same format as sms.ino
+        String weatherMessage = "🚨 FLOOD ALERT! 🚨\n\n";
+        weatherMessage += "📱 System Check:\n\n";
         weatherMessage += "📍 Location: " + location + "\n";
         weatherMessage += "🌤️ Weather: " + weatherDescription + "\n";
         weatherMessage += "🌡️ Temperature: " + String(temperature, 1) + "°C\n";
@@ -1233,40 +1239,3 @@ String toTitleCase(String text) {
   return text;
 }
 
-// Add this function after reconnectWiFi
-bool testSupabaseConnection() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Cannot test Supabase connection: WiFi not connected");
-    return false;
-  }
-
-  Serial.println("Testing Supabase connection...");
-  
-  WiFiClientSecure client;
-  client.setInsecure(); // Skip certificate validation
-  
-  HTTPClient http;
-  String endpoint = String(supabaseUrl) + "/rest/v1/";
-  
-  http.begin(client, endpoint);
-  http.setConnectTimeout(10000); // 10 second timeout
-  http.setTimeout(10000);
-  
-  http.addHeader("apikey", supabaseKey);
-  http.addHeader("Authorization", "Bearer " + String(supabaseKey));
-  
-  int httpCode = http.GET();
-  
-  Serial.print("Supabase test connection response: ");
-  Serial.println(httpCode);
-  
-  http.end();
-  
-  if (httpCode > 0) {
-    Serial.println("Supabase connection successful!");
-    return true;
-  } else {
-    Serial.println("Supabase connection failed. Please check your API key and URL.");
-    return false;
-  }
-}
