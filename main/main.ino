@@ -35,14 +35,14 @@ const char* tableName = "resident_number";
 const char* weatherApiKey = "7970309436bc52d518c7e71e314b8053";
 const char* geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 
-// Fallback coordinates for Quezon City
+// Fallback coordinates for STI College Fairview
 float fallback_latitude = 14.676208;
 float fallback_longitude = 121.043861;
 
 // Global variables for weather data
 float latitude = 0;  // Initialize with fallback coordinates
 float longitude = 0;
-String weatherDescription = "cloudy";  // Set default values
+String weatherDescription = "";  // Set default values
 float temperature = 30.0;
 float feelsLike = 32.0;
 float humidity = 70.0;
