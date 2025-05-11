@@ -439,6 +439,7 @@ void loop() {
     playFloodWarning();  // Optional sound or alert before AI suggestion
 
     // NOW turn off all LEDs after AI suggestion is done
+
     digitalWrite(AI_LED_ONE, LOW);
     digitalWrite(AI_LED_TWO, LOW);
     digitalWrite(AI_LED_THREE, LOW);

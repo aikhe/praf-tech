@@ -1,4 +1,4 @@
-  /*
+/*
  * ESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration
  * 
  * This program uses an ESP32 with FreeRTOS to send SMS messages when a button is pressed
@@ -15,43 +15,14 @@
 #include <freertos/queue.h>
 #include <esp_task_wdt.h>  // Include ESP32 Task Watchdog Timer header
 #include <LiquidCrystal_I2C.h>
+#include "Arduino.h"
 #include "Audio.h"
 #include "SD.h"
 #include "FS.h"
 #include "SPI.h"
 
-// microSD Card Reader connections
-#define SD_CS          5
-#define SPI_MOSI      23 
-#define SPI_MISO      19
-#define SPI_SCK       18
-
-// I2S Connections (MAX98357)
-#define I2S_DOUT      25
-#define I2S_BCLK      27
-#define I2S_LRC       26
-
-// Create Audio object
-Audio audio;
-
-// Task handle for audio playback
-TaskHandle_t audioTaskHandle;
-
-// Audio playback task
-void audioTask(void *parameter) {
-  while (true) {
-    audio.loop();
-
-    if (!audio.isRunning()) {
-      Serial.println("Restarting audio...");
-      audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
-    }
-
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
-}
-
-// CHECKPOINT
+// Define TTS language
+#define TTS_GOOGLE_LANGUAGE "tl-PH" // Tagalog (Philippines)
 
 // WiFi credentials
 const char* ssid = "TK-gacura";
@@ -66,18 +37,40 @@ const char* password = "gisaniel924";
 #define LED_TWO 12
 #define LED_THREE 14
 
+// microSD Card Reader connections
+#define SD_CS          5
+#define SPI_MOSI      23 
+#define SPI_MISO      19
+#define SPI_SCK       18
+
+// I2S Connections (MAX98357)
+#define I2S_DOUT      25
+#define I2S_BCLK      27
+#define I2S_LRC       26
+
 // Constants
 #define SOUND_SPEED 0.034  // Sound speed in cm/uS
 #define DISTANCE_READ_INTERVAL 100  // ms
 #define LED_UPDATE_INTERVAL 50      // ms
-#define LCD_UPDATE_INTERVAL 500     // ms
+#define LCD_UPDATE_INTERVAL 4000    // ms - reduced for more responsive updates
 #define LED_TIMEOUT_MINUTES 10      // LED stays on for 10 minutes
 #define LED_TIMEOUT_MS (LED_TIMEOUT_MINUTES * 60 * 1000)  // 10 minutes in milliseconds
 #define DEBOUNCE_TIME_MS 5000       // 5 seconds debounce to prevent rapid changes
+#define LCD_LOCK_TIME_MS 5000       // 5 seconds to lock LCD text after level detection
 
 // Global variables for sharing data between tasks
 volatile float currentDistance = 0;
 SemaphoreHandle_t distanceMutex;
+
+// LCD and display control variables
+bool lcdTextLocked = false;
+unsigned long lcdLockStartTime = 0;
+unsigned long lastLCDUpdateTime = 0;
+String currentDisplayedStatus = "Normal";
+String weather = ""; // Weather string for display
+
+// Create Audio object
+Audio audio;
 
 // LCD Setup - Assuming standard 16x2 I2C LCD at address 0x27
 // Adjust address if your LCD uses a different one
@@ -89,22 +82,12 @@ unsigned long lastStateUpdateTime = 0;  // For debounce
 int lastDetectedRange = 0;  // 0=no detection, 1=far, 2=medium, 3=close
 int activeState = 0;        // Current active state for both LED and LCD
 bool timeoutEnabled = true;
-// Additional variables for improved LCD management
-unsigned long lastLCDUpdateTime = 0;  // Track last LCD update time
-String currentDisplayedStatus = "";   // Track last status display to avoid unnecessary updates
-unsigned long lcdLockStartTime = 0;   // When the LCD text was locked
-bool lcdTextLocked = false;           // Whether LCD is showing locked text
-#define LCD_LOCK_TIME_MS 5000         // 5 seconds to lock LCD text after level detection
-#define LCD_UPDATE_INTERVAL 4000      // ms - longer interval for normal updates
 
 // Task function prototypes
 void readDistanceTask(void *parameter);
 void controlOutputsTask(void *parameter);
-
-// SMS message function prototypes
-void createAlertSMS(float distance);
-void createCriticalSMS(float distance);
-void createWarningSMS(float distance);
+void createWaterLevelSms(int waterLevel, float distance);
+void sendSmsToAllNumbers();
 
 // HttpSMS API key
 const char* httpSmsApiKey = "MNJmgF7kRvUrTfj4fqDUbrzwoVFpMToWdTbiUx3sQ6jreYnbnu7bym-rQG3kB8_U";
@@ -125,6 +108,7 @@ float fallback_longitude = 121.043861;
 // Global variables for weather data
 float latitude = 0;  // Initialize with fallback coordinates
 float longitude = 0;
+const String location = "New York";
 String weatherDescription = "";  // Set default values
 float temperature = 30.0;
 float feelsLike = 32.0;
@@ -135,7 +119,7 @@ String aiWeatherMessage = "Sa kasalukuyan, walang banta ng baha sa Caloocan. Ang
 
 // SMS configuration
 const char* smsFrom = "+639649687066"; // Your sender number or name
-String phoneNumbers[20]; // Array to store up to 10 phone numbers
+String phoneNumbers[10]; // Array to store up to 10 phone numbers
 int numPhoneNumbers = 0;
 char smsBody[1024]; // Buffer for dynamic SMS content
 
@@ -152,6 +136,10 @@ TaskHandle_t weatherTaskHandle = NULL;
 QueueHandle_t smsQueue = NULL;
 SemaphoreHandle_t phoneNumbersMutex = NULL;
 SemaphoreHandle_t weatherDataMutex = NULL;
+
+// Global variables for SMS control
+unsigned long lastSmsTime = 0;
+#define SMS_COOLDOWN_MS 300000  // 5 minutes cooldown between SMS for the same level
 
 /**
  * Task to read distance from HC-SR04 sensor
@@ -199,6 +187,7 @@ void controlOutputsTask(void *parameter) {
   int currentRange = 0;  // Current detected distance range
   unsigned long currentTime;
   String statusMessage = "";
+  int lastSmsLevel = 0;  // Track the last level that triggered an SMS
  
   while(true) {
     currentTime = millis();
@@ -230,100 +219,142 @@ void controlOutputsTask(void *parameter) {
       lcdTextLocked = false;
       Serial.println("LCD text lock released");
       
-      // When LCD lock is released, return to showing weather information
+      // When LCD lock is released, return to showing location/weather
       // but keep LEDs on until timeout
       lcd.clear();
       lcd.setCursor(0, 0);
-      lcd.print(cityName);
+      lcd.print("Loc: ");
+      lcd.print(location);
+      
       lcd.setCursor(0, 1);
       lcd.print(weatherDescription);
       lcd.print(" ");
-      lcd.print((int)temperature);
-      lcd.print("C");
+      lcd.print(temperature);
       
       lastLCDUpdateTime = currentTime; // Reset LCD update timer
     }
     
-    // Update LCD with current information if not locked and update interval passed
+    // Update LCD with current information
     if (!lcdTextLocked && currentTime - lastLCDUpdateTime >= LCD_UPDATE_INTERVAL) {
       // Clear LCD for clean display
       lcd.clear();
       
-      // Show monitoring status on LCD when not locked
+      // Always show location and weather on LCD when not locked
       lcd.setCursor(0, 0);
-      lcd.print(cityName);
+      lcd.print("Loc: ");
+      lcd.print(location);
+      
       lcd.setCursor(0, 1);
       lcd.print(weatherDescription);
       lcd.print(" ");
-      lcd.print((int)temperature);
-      lcd.print("C");
+      lcd.print(temperature);
       currentDisplayedStatus = "Normal";
       
       lastLCDUpdateTime = currentTime;
     }
     
     // Check if a valid range is detected and if debounce period has passed
-    if (currentRange != lastDetectedRange && currentRange > 0 && 
+    if (currentRange != lastDetectedRange && 
         (currentTime - lastStateUpdateTime) >= DEBOUNCE_TIME_MS) {
       // New valid range detected and debounce time passed
       lastDetectedRange = currentRange;
       lastStateUpdateTime = currentTime; // Update debounce timer
-      stateLastChangeTime = currentTime; // Reset 10-minute timer
-      activeState = currentRange;
       
-      // Update LEDs based on new range
-      digitalWrite(LED_ONE, currentRange == 1 ? HIGH : LOW);
-      digitalWrite(LED_TWO, currentRange == 2 ? HIGH : LOW);
-      digitalWrite(LED_THREE, currentRange == 3 ? HIGH : LOW);
-      
-      // Lock the LCD text for 5 seconds
-      lcdTextLocked = true;
-      lcdLockStartTime = currentTime;
-      
-      // Force update the LCD immediately with the water level info
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Water Dis: ");
-      lcd.print((int)distance);
-      lcd.print("cm");
-      
-      lcd.setCursor(0, 1);
-      lcd.print("Status: ");
-      lcd.print(statusMessage);
-      currentDisplayedStatus = statusMessage;
-      
-      Serial.print("New range detected: ");
-      Serial.println(currentRange);
-      Serial.print("Status: ");
-      Serial.println(statusMessage);
-      Serial.println("Timer reset to 10 minutes");
-      Serial.println("LCD text locked for 5 seconds");
-      
-      // Create appropriate SMS message based on flood level
-      switch(currentRange) {
-        case 1: // Alert
-          createAlertSMS(distance);
-          Serial.println("Created Alert SMS for Level 1");
-          break;
-        case 2: // Critical
-          createCriticalSMS(distance);
-          Serial.println("Created Critical SMS for Level 2");
-          break;
-        case 3: // Warning
-          createWarningSMS(distance);
-          Serial.println("Created Warning SMS for Level 3");
-          break;
-      }
-      
-      // Queue SMS to be sent - use a specific signal value for each level
-      int signalValue = 10 + currentRange; // 11=Alert, 12=Critical, 13=Warning
-      if (xQueueSend(smsQueue, &signalValue, 0) == pdTRUE) {
-        Serial.printf("Queued SMS for flood level %d\n", currentRange);
+      if (currentRange > 0) {
+        // Water level detected
+        activeState = currentRange;
+        stateLastChangeTime = currentTime; // Reset 10-minute timer
+        
+        // Update LEDs based on new range
+        digitalWrite(LED_ONE, currentRange == 1 ? HIGH : LOW);
+        digitalWrite(LED_TWO, currentRange == 2 ? HIGH : LOW);
+        digitalWrite(LED_THREE, currentRange == 3 ? HIGH : LOW);
+        
+        // Play the appropriate alert sound based on water level - with safety checks
+        if (SD.exists("/LOW-FLOOD-HIGH.mp3") && SD.exists("/MEDIUM-FLOOD-HIGH2.mp3") && SD.exists("/HIGH-FLOOD-HIGH2.mp3")) {
+          switch (currentRange) {
+            case 1:  // Alert (far)
+              Serial.println("Playing alert sound");
+              if (!audio.isRunning()) {  // Only start a new file if not already playing
+                audio.connecttoFS(SD, "/LOW-FLOOD-HIGH.mp3");
+              }
+              break;
+            case 2:  // Critical (medium)
+              Serial.println("Playing critical sound");
+              if (!audio.isRunning()) {  // Only start a new file if not already playing
+                audio.connecttoFS(SD, "/MEDIUM-FLOOD-HIGH2.mp3");
+              }
+              break;
+            case 3:  // Warning (close)
+              Serial.println("Playing warning sound");
+              if (!audio.isRunning()) {  // Only start a new file if not already playing
+                audio.connecttoFS(SD, "/HIGH-FLOOD-HIGH2.mp3");
+              }
+              break;
+          }
+        } else {
+          Serial.println("Alert sound files not found on SD card");
+        }
+        
+        // Create and send custom SMS for the detected water level
+        // Only send if it's a different level than the last SMS or if cooldown period has passed
+        if ((currentRange != lastSmsLevel) || (currentTime - lastSmsTime >= SMS_COOLDOWN_MS)) {
+          createWaterLevelSms(currentRange, distance);
+          sendSmsToAllNumbers();
+          lastSmsLevel = currentRange;
+          lastSmsTime = currentTime;
+          Serial.print("SMS sent for water level: ");
+          Serial.println(currentRange);
+        } else {
+          Serial.println("SMS cooldown active. Not sending another SMS for the same level yet.");
+        }
+        
+        // Lock the LCD text for 5 seconds
+        lcdTextLocked = true;
+        lcdLockStartTime = currentTime;
+        
+        // Force update the LCD immediately with the water level info
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Water Dis: ");
+        lcd.print((int)distance);
+        lcd.print("cm");
+        
+        lcd.setCursor(0, 1);
+        lcd.print("Status: ");
+        lcd.print(statusMessage);
+        currentDisplayedStatus = statusMessage;
+        
+        Serial.print("New range detected: ");
+        Serial.println(currentRange);
+        Serial.print("Status: ");
+        Serial.println(statusMessage);
+        Serial.println("Timer reset to 10 minutes");
+        Serial.println("LCD text locked for 5 seconds");
       } else {
-        Serial.println("Failed to queue SMS - queue might be full");
+        // No water level detected
+        // Only turn off LEDs if no active state or timeout has expired
+        if (activeState == 0 || (currentTime - stateLastChangeTime) >= LED_TIMEOUT_MS) {
+          digitalWrite(LED_ONE, LOW);
+          digitalWrite(LED_TWO, LOW);
+          digitalWrite(LED_THREE, LOW);
+          activeState = 0;
+        }
+        
+        // Update LCD with location and weather
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Loc: ");
+        lcd.print(location);
+        
+        lcd.setCursor(0, 1);
+        lcd.print(weatherDescription);
+        lcd.print(" ");
+        lcd.print(temperature);
+        
+        Serial.println("No water level detected");
       }
-      
-    } else if (currentRange != lastDetectedRange && currentRange > 0) {
+    } else if (currentRange != lastDetectedRange) {
       // Range changed but within debounce period - ignore the change
       Serial.print("Ignoring change to range ");
       Serial.print(currentRange);
@@ -337,12 +368,13 @@ void controlOutputsTask(void *parameter) {
       digitalWrite(LED_TWO, LOW);
       digitalWrite(LED_THREE, LOW);
       
-      // Update LCD with normal monitoring status if not already showing
+      // Update LCD with location and weather if not already showing
       if (currentDisplayedStatus != "Normal") {
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("Loc: ");
-        lcd.print(cityName);
+        lcd.print(location);
+        
         lcd.setCursor(0, 1);
         lcd.print(weatherDescription);
         lcd.print(" ");
@@ -500,6 +532,58 @@ bool getWeather() {
   return success;
 }
 
+// 🔊 Speak in smart chunks
+void speakTextInChunks(String text, int maxLength) {
+  // Use a smaller chunk size
+  int chunkSize = 60;  // Reduced from 100
+
+  int start = 0;
+  while (start < text.length()) {
+    int end = start + chunkSize;
+
+    // Ensure we don't split in the middle of a word
+    if (end < text.length()) {
+      // Prefer ending at punctuation
+      int punctEnd = end;
+      while (punctEnd > start && text[punctEnd] != '.' && text[punctEnd] != ',' && text[punctEnd] != ';' && text[punctEnd] != ':') {
+        punctEnd--;
+      }
+
+      // If we found punctuation, use that as the end point
+      if (punctEnd > start && (text[punctEnd] == ',' || text[punctEnd] == ';' || text[punctEnd] == ':')) {
+        end = punctEnd + 1;  // Include the punctuation
+      } else {
+        // Otherwise find a space
+        while (end > start && text[end] != ' ') {
+          end--;
+        }
+        if (end == start) {
+          end = start + chunkSize;  // Worst case, just cut at max length
+        }
+      }
+    }
+
+    String chunk = text.substring(start, end);
+    chunk.trim();  // Remove any leading/trailing spaces
+
+    if (chunk.length() > 0) {
+      Serial.println("Playing chunk: '" + chunk + "'");
+      Serial.println("Start: " + String(start) + ", End: " + String(end));
+
+      audio.connecttospeech(chunk.c_str(), TTS_GOOGLE_LANGUAGE);
+      while (audio.isRunning()) {
+        audio.loop();
+      }
+    }
+
+    start = end;
+  }
+}
+
+void playFloodWarning() {
+  speakTextInChunks(aiWeatherMessage, 100);  // Split into chunks of ~100 characters
+}
+
 // Function to get AI weather suggestion from Gemini
 bool getAISuggestion() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -610,96 +694,6 @@ void updateSmsBody() {
     // Print SMS body for debugging
     Serial.println("Updated SMS body:");
     Serial.println(smsBody);
-    
-    xSemaphoreGive(weatherDataMutex);
-  }
-}
-
-// Function to create Alert level SMS (Level 1 - Far range)
-void createAlertSMS(float distance) {
-  if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    // Make sure we have valid-looking values
-    String localWeatherDesc = weatherDescription.length() > 0 ? weatherDescription : "cloudy";
-    float localTemp = temperature != 0.0 ? temperature : 30.0;
-    float localFeelsLike = feelsLike != 0.0 ? feelsLike : 32.0;
-    float localHumidity = humidity != 0.0 ? humidity : 70.0;
-    
-    snprintf(smsBody, sizeof(smsBody),
-      "⚠️ FLOOD ALERT - LEVEL 1 ⚠️\n\n"
-      "📍 Location: %s\n"
-      "🔍 Current water level: %.1f cm\n"
-      "⚠️ Status: ALERT - Initial flooding detected\n\n"
-      // "🌤️ Weather: %s\n"
-      // "🌡️ Temperature: %.1f°C\n"
-      // "💧 Humidity: %.0f%%\n\n"
-      "🚨 PRECAUTIONS:\n"
-      "- Monitor water levels\n"
-      "- Prepare emergency supplies\n"
-      "- Stay tuned for updates\n\n"
-      "From: PRAF Technology Flood Monitoring System",
-      cityName.c_str(), distance
-    );
-    
-    xSemaphoreGive(weatherDataMutex);
-  }
-}
-
-// Function to create Critical level SMS (Level 2 - Medium range)
-void createCriticalSMS(float distance) {
-  if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    // Make sure we have valid-looking values
-    String localWeatherDesc = weatherDescription.length() > 0 ? weatherDescription : "cloudy";
-    float localTemp = temperature != 0.0 ? temperature : 30.0;
-    float localFeelsLike = feelsLike != 0.0 ? feelsLike : 32.0;
-    float localHumidity = humidity != 0.0 ? humidity : 70.0;
-    
-    snprintf(smsBody, sizeof(smsBody),
-      "🔴 FLOOD CRITICAL - LEVEL 2 🔴\n\n"
-      "📍 Location: %s\n"
-      "🔍 Current water level: %.1f cm\n"
-      "⚠️ Status: CRITICAL - Significant flooding\n\n"
-      // "🌤️ Weather: %s\n"
-      // "🌡️ Temperature: %.1f°C\n"
-      // "💧 Humidity: %.0f%%\n\n"
-      "🚨 URGENT ACTIONS REQUIRED:\n"
-      "- Move valuables to higher ground\n"
-      "- Prepare for possible evacuation\n"
-      "- Avoid flooded areas\n"
-      "- Charge communication devices\n\n"
-      "From: PRAF Technology Flood Monitoring System",
-      cityName.c_str(), distance
-    );
-    
-    xSemaphoreGive(weatherDataMutex);
-  }
-}
-
-// Function to create Warning level SMS (Level 3 - Close range)
-void createWarningSMS(float distance) {
-  if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    // Make sure we have valid-looking values
-    String localWeatherDesc = weatherDescription.length() > 0 ? weatherDescription : "cloudy";
-    float localTemp = temperature != 0.0 ? temperature : 30.0;
-    float localFeelsLike = feelsLike != 0.0 ? feelsLike : 32.0;
-    float localHumidity = humidity != 0.0 ? humidity : 70.0;
-    
-    snprintf(smsBody, sizeof(smsBody),
-      "🚨 FLOOD WARNING - LEVEL 3 🚨\n\n"
-      "📍 Location: %s\n"
-      "🔍 Current water level: %.1f cm\n"
-      "⚠️ Status: WARNING - Severe flooding\n\n"
-      // "🌤️ Weather: %s\n"
-      // "🌡️ Temperature: %.1f°C\n"
-      // "💧 Humidity: %.0f%%\n\n"
-      "🚨 EMERGENCY ACTIONS REQUIRED:\n"
-      "- EVACUATE immediately if instructed\n"
-      "- Move to higher ground NOW\n"
-      "- Follow emergency routes\n"
-      "- Do NOT attempt to cross floodwaters\n"
-      "- Call emergency services if trapped\n\n"
-      "From: PRAF Technology Flood Monitoring System",
-      cityName.c_str(), distance
-    );
     
     xSemaphoreGive(weatherDataMutex);
   }
@@ -936,26 +930,21 @@ void buttonTask(void *pvParameters) {
   
   while (1) {
     int reading = digitalRead(BTTN_SMS);
-    int ai = digitalRead(BTTN_AI);
     
     // If button state changed
     if (reading != lastButtonState) {
       lastDebounceTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
     }
 
+    if (digitalRead(BTTN_AI) == LOW) {
+      Serial.println("AI button pressed!");
+
+      playFloodWarning();  // Optional sound or alert before AI suggestion
+    }
     
     // If enough time has passed since last state change
     if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastDebounceTime) > DEBOUNCE_DELAY) {
       // If button is pressed (LOW)
-      if (ai == LOW) {
-        Serial.println("Button pressed! AI SMS...");
-        Serial.println(aiWeatherMessage);
-
-        while (digitalRead(BTTN_AI) == LOW) {
-          vTaskDelay(pdMS_TO_TICKS(10));
-        }
-      }
-
       if (reading == LOW) {
         Serial.println("Button pressed! Queueing SMS...");
         // Send a message to the queue
@@ -998,52 +987,16 @@ void wifiTask(void *pvParameters) {
   // Initial fetch of phone numbers
   fetchPhoneNumbers();
   
-  // Wait for weather to be initialized before handling SMS
-  int timeout = 0;
-  while (!weatherInitialized && timeout < 30) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    timeout++;
-  }
-  
-  if (!weatherInitialized) {
-    Serial.println("Weather initialization timed out. SMS will use default values.");
-    updateSmsBody(); // Create SMS with default values
-  }
-  
   while (1) {
     if (xQueueReceive(smsQueue, &signalValue, portMAX_DELAY)) {
       if (WiFi.status() == WL_CONNECTED) {
-        // Determine what type of SMS to send based on signal value
-        String alertType = "Standard";
-        
-        if (signalValue >= 11 && signalValue <= 13) {
-          // This is a flood level alert (11=Alert, 12=Critical, 13=Warning)
-          int floodLevel = signalValue - 10;
-          
-          switch(floodLevel) {
-            case 1:
-              alertType = "Alert (Level 1)";
-              break;
-            case 2:
-              alertType = "Critical (Level 2)";
-              break;
-            case 3:
-              alertType = "Warning (Level 3)";
-              break;
-          }
-          
-          Serial.printf("Preparing to send %s SMS alerts\n", alertType.c_str());
-          // SMS body was already prepared in controlOutputsTask
-        } else {
-          // Standard SMS button press - update SMS body with current weather
-          updateSmsBody();
-          alertType = "Standard";
-        }
+        // Make sure SMS body is up-to-date with latest weather data
+        updateSmsBody();
         
         // Take the mutex to access the phone numbers array
         if (xSemaphoreTake(phoneNumbersMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
           if (numPhoneNumbers > 0) {
-            Serial.printf("Sending %s SMS to %d recipients...\n", alertType.c_str(), numPhoneNumbers);
+            Serial.printf("Sending SMS to %d recipients...\n", numPhoneNumbers);
             
             // Send SMS to all phone numbers
             for (int i = 0; i < numPhoneNumbers; i++) {
@@ -1057,8 +1010,6 @@ void wifiTask(void *pvParameters) {
               // Explicitly yield to the scheduler
               taskYIELD();
             }
-            
-            Serial.printf("Finished sending %s SMS alerts\n", alertType.c_str());
           } else {
             Serial.println("No phone numbers available. SMS not sent.");
           }
@@ -1072,12 +1023,122 @@ void wifiTask(void *pvParameters) {
   }
 }
 
-void setup() {
-  // Set microSD Card CS pin  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
+// Function to create custom SMS body for different water levels
+void createWaterLevelSms(int waterLevel, float distance) {
+  if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    // Make sure we have valid-looking values
+    String localWeatherDesc = weatherDescription.length() > 0 ? weatherDescription : "cloudy";
+    float localTemp = temperature != 0.0 ? temperature : 30.0;
+    float localFeelsLike = feelsLike != 0.0 ? feelsLike : 32.0;
+    float localHumidity = humidity != 0.0 ? humidity : 70.0;
+    
+    String levelMessage;
+    String levelEmoji;
+    String actionRequired;
+    
+    // Create custom message based on water level
+    switch (waterLevel) {
+      case 1: // Alert (Low level)
+        levelEmoji = "⚠️";
+        levelMessage = "LOW LEVEL FLOOD ALERT";
+        actionRequired = "Monitor water levels. Prepare emergency supplies. Stay informed.";
+        break;
+      case 2: // Critical (Medium level)
+        levelEmoji = "🔴";
+        levelMessage = "MEDIUM LEVEL FLOOD WARNING";
+        actionRequired = "Move valuables to higher ground. Prepare for possible evacuation. Stay vigilant.";
+        break;
+      case 3: // Warning (High level)
+        levelEmoji = "⛔";
+        levelMessage = "HIGH LEVEL FLOOD EMERGENCY";
+        actionRequired = "Evacuate immediately to designated safe zones. Follow emergency protocols. Avoid flooded areas.";
+        break;
+      default:
+        levelEmoji = "ℹ️";
+        levelMessage = "WATER LEVEL UPDATE";
+        actionRequired = "No immediate action required. Stay informed.";
+    }
+    
+    snprintf(smsBody, sizeof(smsBody),
+      "%s %s %s\n\n"
+      "📍 Location: %s\n"
+      "💧 Water Level: %d cm\n"
+      "🌤️ Weather: %s\n"
+      "🌡️ Temperature: %.1f°C\n"
+      "💧 Humidity: %.0f%%\n\n"
+      "⚡ ACTION REQUIRED: %s\n\n"
+      "From: PRAF Technology Flood Monitoring System",
+      levelEmoji, levelMessage, levelEmoji,
+      cityName.c_str(), (int)distance,
+      localWeatherDesc.c_str(), localTemp, localHumidity,
+      actionRequired.c_str()
+    );
+    
+    // Print SMS body for debugging
+    Serial.println("Created water level SMS:");
+    Serial.println(smsBody);
+    
+    xSemaphoreGive(weatherDataMutex);
+  }
+}
 
+// Function to send SMS to all registered numbers
+void sendSmsToAllNumbers() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected. Cannot send SMS.");
+    return;
+  }
+  
+  // Take the mutex to access the phone numbers array
+  if (xSemaphoreTake(phoneNumbersMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (numPhoneNumbers > 0) {
+      Serial.printf("Sending water level SMS to %d recipients...\n", numPhoneNumbers);
+      
+      // Send SMS to all phone numbers
+      for (int i = 0; i < numPhoneNumbers; i++) {
+        // Yield to prevent watchdog trigger
+        vTaskDelay(pdMS_TO_TICKS(10));
+        
+        sendHttpSMS(smsFrom, phoneNumbers[i].c_str(), smsBody);
+        // Increased delay between sending messages to give more time for system tasks
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        // Explicitly yield to the scheduler
+        taskYIELD();
+      }
+    } else {
+      Serial.println("No phone numbers available. SMS not sent.");
+    }
+    xSemaphoreGive(phoneNumbersMutex);
+  }
+}
+
+void setup() {
   // Initialize serial communication
   Serial.begin(115200);
+
+  // Connect to WiFi
+  Serial.printf("Connecting to %s ", ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.print(".");
+  }
+  Serial.println(" CONNECTED");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  
+  // Wait for weather to be initialized before handling SMS
+  int timeout = 0;
+  while (!weatherInitialized && timeout < 30) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    timeout++;
+  }
+  
+  if (!weatherInitialized) {
+    Serial.println("Weather initialization timed out. SMS will use default values.");
+    updateSmsBody(); // Create SMS with default values
+  }
 
   // Initialize LCD
   Wire.begin();
@@ -1091,18 +1152,8 @@ void setup() {
   delay(1000);
 
   Serial.println("\nESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration");
-
-  // Connect to WiFi
-  Serial.printf("Connecting to %s ", ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.print(".");
-  }
-  Serial.println(" CONNECTED");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-
+  Serial.println("Automatic SMS alerts enabled for water level detection");
+  
   // Configure HC-SR04 pins
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
@@ -1120,14 +1171,8 @@ void setup() {
   // Create mutex for shared data protection
   distanceMutex = xSemaphoreCreateMutex();
   
-  // Initialize LCD-related variables
-  lastLCDUpdateTime = 0;
-  currentDisplayedStatus = "Normal";
-  lcdTextLocked = false;
-  
   // Set button pin as input with internal pull-up resistor
   pinMode(BTTN_SMS, INPUT_PULLUP);
-  pinMode(BTTN_AI, INPUT_PULLUP);
   
   // Create mutexes
   phoneNumbersMutex = xSemaphoreCreateMutex();
@@ -1136,41 +1181,11 @@ void setup() {
   // Create queue for button events
   smsQueue = xQueueCreate(5, sizeof(int));
 
-  // Initialize SPI for SD card
-  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-
-  // Initialize SD card
-  if (!SD.begin(SD_CS, SPI)) {
-    Serial.println("SD card initialization failed!");
-    while (true);
-  }
-
-  Serial.println("SD card initialized.");
-
-  // // Set up I2S for audio output
-  // audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-
-  // // Set volume level (0–100)
-  // audio.setVolume(100);
-
-  // // Play the initial audio file
-  // audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
-
-  // Create FreeRTOS task for audio playback
-  // xTaskCreate(
-  //   audioTask,           // Task function
-  //   "AudioTask",         // Name
-  //   4096,                // Stack size
-  //   NULL,                // Parameter
-  //   1,                   // Priority
-  //   &audioTaskHandle     // Task handle
-  // );
-
   // Create FreeRTOS tasks
   xTaskCreate(
     readDistanceTask,     // Task function
     "ReadDistance",       // Task name
-    4096,                 // Stack size (bytes) - increased from 2048
+    2048,                 // Stack size (bytes)
     NULL,                 // Task parameters
     1,                    // Priority (1 is low)
     NULL                  // Task handle
@@ -1179,7 +1194,7 @@ void setup() {
   xTaskCreate(
     controlOutputsTask,   // Task function to control both LEDs and LCD
     "ControlOutputs",     // Task name
-    8192,                 // Stack size (bytes) - increased from 2048
+    2048,                 // Stack size (bytes)
     NULL,                 // Task parameters
     1,                    // Priority
     NULL                  // Task handle
@@ -1223,6 +1238,20 @@ void setup() {
   );
 
   Serial.println("ESP32 HC-SR04 Distance Sensor with FreeRTOS Started");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Loc: ");
+  lcd.print(location);
+  lcd.setCursor(0, 1);
+  
+  // Initialize weatherDescription if empty
+  if (weatherDescription.length() == 0) {
+    weatherDescription = "clear sky";
+  }
+  
+  lcd.print(weatherDescription);
+  lcd.print(" ");
+  lcd.print(temperature);
 }
 
 void loop() {
