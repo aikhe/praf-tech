@@ -1,4 +1,4 @@
-  /*
+    /*
  * ESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration
  * 
  * This program uses an ESP32 with FreeRTOS to send SMS messages when a button is pressed
@@ -15,12 +15,22 @@
 #include <freertos/queue.h>
 #include <esp_task_wdt.h>  // Include ESP32 Task Watchdog Timer header
 #include <LiquidCrystal_I2C.h>
-#include "Audio.h"
-#include "SD.h"
-#include "FS.h"
-#include "SPI.h"
+#include <SPI.h>
+#include <SD.h>
+#include <Audio.h>
+// #include "FS.h"
+
+// Pull in the ESP‐IDF I2S declarations
+extern "C" {
+  #include "driver/i2s.h"
+}
 
 // microSD Card Reader connections
+#define SD_CS_PIN    5
+#define SD_SCK_PIN  18
+#define SD_MISO_PIN 19
+#define SD_MOSI_PIN 23
+
 #define SD_CS          5
 #define SPI_MOSI      23 
 #define SPI_MISO      19
@@ -31,25 +41,29 @@
 #define I2S_BCLK      27
 #define I2S_LRC       26
 
-// Create Audio object
+// Use VSPI (SPIClass HSPI would be SPIClass(HSPI); VSPI is default second bus)
+SPIClass spiSD(VSPI);
+
+// // Create Audio object
 Audio audio;
+// Audio *audio = nullptr;  // no global instantiation
 
-// Task handle for audio playback
-TaskHandle_t audioTaskHandle;
-
-// Audio playback task
-void audioTask(void *parameter) {
-  while (true) {
-    audio.loop();
-
-    if (!audio.isRunning()) {
-      Serial.println("Restarting audio...");
-      audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
-    }
-
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
-}
+// // Task handle for audio playback
+// TaskHandle_t audioTaskHandle;
+// 
+// // Audio playback task
+// void audioTask(void *parameter) {
+//   while (true) {
+//     audio.loop();
+// 
+//     if (!audio.isRunning()) {
+//       Serial.println("Restarting audio...");
+//       audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
+//     }
+// 
+//     vTaskDelay(10 / portTICK_PERIOD_MS);
+//   }
+// }
 
 // CHECKPOINT
 
@@ -152,6 +166,40 @@ TaskHandle_t weatherTaskHandle = NULL;
 QueueHandle_t smsQueue = NULL;
 SemaphoreHandle_t phoneNumbersMutex = NULL;
 SemaphoreHandle_t weatherDataMutex = NULL;
+
+// Recursively list a directory and its children
+void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
+  Serial.printf("Listing directory: %s\n", dirname);
+
+  File root = fs.open(dirname);
+  if (!root) {
+    Serial.println("Failed to open directory");
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println("Not a directory");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    for (uint8_t i = 0; i < levels; i++) {
+      Serial.print("  ");
+    }
+    if (file.isDirectory()) {
+      Serial.print("[DIR] ");
+      Serial.println(file.name());
+      // Recurse into sub-directory
+      listDir(fs, file.name(), levels + 1);
+    } else {
+      Serial.print("[FILE] ");
+      Serial.print(file.name());
+      Serial.print("\tSIZE: ");
+      Serial.println(file.size());
+    }
+    file = root.openNextFile();
+  }
+}
 
 /**
  * Task to read distance from HC-SR04 sensor
@@ -1092,6 +1140,10 @@ void setup() {
 
   Serial.println("\nESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration");
 
+  // ——— 1) Uninstall I2S before Wi-Fi comes up ———
+  // This tears down both TX (DAC) and RX (ADC2) channels
+  i2s_driver_uninstall(I2S_NUM_0);                 // frees ADC2 for Wi-Fi :contentReference[oaicite:1]{index=1}
+
   // Connect to WiFi
   Serial.printf("Connecting to %s ", ssid);
   WiFi.begin(ssid, password);
@@ -1136,22 +1188,30 @@ void setup() {
   // Create queue for button events
   smsQueue = xQueueCreate(5, sizeof(int));
 
-  // Initialize SPI for SD card
-  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-
-  // Initialize SD card
-  if (!SD.begin(SD_CS, SPI)) {
-    Serial.println("SD card initialization failed!");
-    while (true);
+  spiSD.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  if (!SD.begin(SD_CS, spiSD)) {
+    Serial.println("❌ SD init failed");
+    while (1) delay(100);
   }
+  Serial.println("✅ SD initialized");
+
+  // // Initialize SPI for SD card
+  // SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+
+  // // Initialize SD card
+  // if (!SD.begin(SD_CS, SPI)) {
+  //   Serial.println("SD card initialization failed!");
+  //   while (true);
+  // }
 
   Serial.println("SD card initialized.");
+  listDir(SD, "/", 0);
 
-  // // Set up I2S for audio output
-  // audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  // Set up I2S for audio output
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
 
-  // // Set volume level (0–100)
-  // audio.setVolume(100);
+  // Set volume level (0–100)
+  audio.setVolume(100);
 
   // // Play the initial audio file
   // audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
