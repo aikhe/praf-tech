@@ -8,8 +8,6 @@
 #include "FS.h"
 #include "SPI.h"
 #include <vector>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 
 // Wifi
 #define SSID "TK-gacura"
@@ -48,7 +46,7 @@ const char* weatherApiKey = "7970309436bc52d518c7e71e314b8053";
 const char* geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 
 // HttpSMS API credentials
-const char* httpSmsApiKey = "MNJmgF7kRvUrTfj4fqDUbrzwoVFpMToWdTbiUx3sQ6jreYnbnu7bym-rQG3kB8_U";
+const char* httpSmsApiKey = "iFqOahA-gXvOzLHlt3mHWIs5kLsqQ11FFu8QblKwxKMzDj49mLyw_dpEgMkIDFsS";
 
 // Create Audio object
 Audio audio;
@@ -70,9 +68,9 @@ String AISuggestion = "";
 #define TTS_GOOGLE_LANGUAGE "tl"  // "tl" for Tagalog
 
 // Dual timer configuration
-#define LED_HOLD_TIME 6000      // Minimum time (ms) before LED can change (debounce)
+#define LED_HOLD_TIME 6000     // Minimum time (ms) before LED can change (debounce)
 #define LED_ON_DURATION 600000  // Time LED stays on once activated (10 minutes)
-#define ALERT_COOLDOWN 600000   // 10 minutes cooldown between same level alerts (in milliseconds)
+#define ALERT_COOLDOWN 600000 // 10 minutes cooldown between same level alerts (in milliseconds)
 
 unsigned long lastLedChangeTime = 0;  // For tracking LED hold time (debounce)
 unsigned long ledActivationTime = 0;  // For tracking how long LED has been active
@@ -101,7 +99,6 @@ int buttonState = 0;
 int lastButtonState = HIGH;
 
 bool isRunning = false;
-bool isShowingWeather = true;  // Track whether LCD is showing weather or water level
 
 unsigned long previousMillis = 0;
 unsigned long interval = 300;
@@ -114,52 +111,29 @@ const unsigned long checkInterval = 10000;  // Check every 10 seconds
 
 std::vector<String> registeredPhoneNumbers;
 
+// Add these global variables at the top with other globals
+bool isSendingSMS = false;
+unsigned long lastSMSTime = 0;
+int currentSMSIndex = 0;
+String currentSMSMessage = "";
+
 const char* fromSmsNumber = "+639649687066";
-
-// Add this with other global variables at the top
-bool isAudioPlaying = false;
-unsigned long lastWeatherDisplayTime = 0;  // Timer for weather display refresh
-
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Try 0x3F if 0x27 doesn't work
-
-// Add debounce variables after existing declarations at the top of the file
-unsigned long smsLastDebounceTime = 0;
-unsigned long smsDebounceDelay = 300;  // Debounce time in milliseconds
-int smsButtonState = HIGH;
-int smsLastButtonState = HIGH;
-
-// Add this global variable near the top with other variables
-unsigned long lastSupabaseRetryTime = 0;
-const unsigned long supabaseRetryInterval = 60000; // Retry every minute on failure
 
 void setup() {
   Serial.begin(115200);
-
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Starting");
-  lcd.setCursor(0, 1);
-  lcd.print("Device....");
-
   WiFi.begin(SSID, PASSWORD);
   Serial.print("Connecting to WiFi...");
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.print(".");
   }
-  Serial.println("Initializing LCD...");
-  Wire.begin(21, 22);
-
   Serial.println("\nConnected to WiFi\n");
+  getNumbers();
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nConnected to WiFi");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
-
-    // Test Supabase connection
 
     latitude = fallback_latitude;
     longitude = fallback_longitude;
@@ -167,6 +141,20 @@ void setup() {
     if (getWeather()) {
       getAISuggestion();
     }
+
+    // Get location from ipinfo.io
+    // if (getLocationFromIpInfo()) {
+    //   Serial.println("Successfully obtained location from ipinfo.io");
+    //   if (getWeather()) {
+    //     getAISuggestion();
+    //   }
+    //   latitude = fallback_latitude;
+    //   longitude = fallback_longitude;
+    // } else {
+    //   latitude = fallback_latitude;
+    //   longitude = fallback_longitude;
+    //   Serial.println("Using fallback coordinates");
+    // }
   } else {
     Serial.println("\nFailed to connect to WiFi");
   }
@@ -193,14 +181,6 @@ void setup() {
   // Set Volume (0 to 21)
   audio.setVolume(100);
 
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("PRAF Flood");
-  lcd.setCursor(0, 1);
-  lcd.print("Alert System");
-
   // HC-SRO4 Sensor
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
@@ -222,10 +202,8 @@ void setup() {
   pinMode(AI_LED_TWO, OUTPUT);
   pinMode(AI_LED_THREE, OUTPUT);
 
-  getNumbers();
-
   // Play confirmation sound
-  audio.connecttoFS(SD, "DEVICE-START-VOICE.mp3");
+  audio.connecttoFS(SD, "DEVICE-START-VOICe.mp3");
   while (audio.isRunning()) {
     audio.loop();
   }
@@ -251,113 +229,68 @@ void loop() {
   // Serial.print(distance);
   // Serial.println(" cm");
 
-  // Only process sensor alerts if audio is not playing
-  if (!isAudioPlaying) {
-    // Determine target LED state based on current distance
-    int targetLedState;
-    if (distance <= 10) {
-      targetLedState = 3;  // LED_THREE
-      if (isShowingWeather) {
-        lcd.clear();
-        isShowingWeather = false;
-      }
-      lcd.setCursor(0, 0);
-      lcd.print("Water Dis: ");
-      lcd.print((int)distance);  // Print the actual distance value
-      lcd.print("cm");     // Optional: add unit
-      lcd.setCursor(0, 1);
-      lcd.print("Status: Warning");
-      Serial.println(distance);
-    } else if (distance <= 20) {
-      targetLedState = 2;  // LED_TWO
-      if (isShowingWeather) {
-        lcd.clear();
-        isShowingWeather = false;
-      }
-      lcd.setCursor(0, 0);
-      lcd.print("Water Dis: ");
-      lcd.print((int)distance);  // Print the actual distance value
-      lcd.print("cm");     // Optional: add unit
-      lcd.setCursor(0, 1);
-      lcd.print("Status: Alert");
-      Serial.println(distance);
-    } else if (distance <= 40) {
-      targetLedState = 1;  // LED_ONE
-      if (isShowingWeather) {
-        lcd.clear();
-        isShowingWeather = false;
-      }
-      lcd.setCursor(0, 0);
-      lcd.print("Water Dis: ");
-      lcd.print((int)distance);  // Print the actual distance value
-      lcd.print("cm");     // Optional: add unit
-      lcd.setCursor(0, 1);
-      lcd.print("Status: Cautious");
-      Serial.println(distance);
-    } else {
-      targetLedState = 0;  // All LEDs off
-      
-      // Only refresh weather display every 5 seconds or when switching from water level display
-      if (!isShowingWeather || (currentTime - lastWeatherDisplayTime) >= 5000) {
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print(location);
-        lcd.print(", ");
-        lcd.print((int)temperature);
-        lcd.print("'C");
-        lcd.setCursor(0, 1);
-        lcd.print(toTitleCase(weatherDescription));
-        
-        isShowingWeather = true;
-        lastWeatherDisplayTime = currentTime;
-      }
+  // Determine target LED state based on current distance
+  int targetLedState;
+  if (distance <= 12) {
+    targetLedState = 3;  // LED_THREE
+    Serial.println(distance);
+  } else if (distance <= 22) {
+    targetLedState = 2;  // LED_TWO
+    Serial.println(distance);
+  } else if (distance <= 40) {
+    targetLedState = 1;  // LED_ONE
+    Serial.println(distance);
+  } else {
+    targetLedState = 0;  // All LEDs off
+  }
+
+  // Check if enough time has passed since last LED change (debounce)
+  bool enoughTimePassedSinceLastChange = (currentTime - lastLedChangeTime) >= LED_HOLD_TIME;
+  
+  // Check if any active LED has completed its duration
+  if (ledActivated && currentTime - ledActivationTime >= LED_ON_DURATION) {
+    turnOffAllLEDs();
+    ledActivated = false;
+    currentLedState = 0;
+    Serial.println("LED 60-second active period ended, all LEDs turned off");
+  }
+
+  // Only process new alerts if enough time has passed since last change
+  bool canTriggerAlert = enoughTimePassedSinceLastChange && 
+                        (!ledActivated || 
+                         targetLedState != lastAlertLevel ||
+                         (targetLedState == lastAlertLevel && (currentTime - lastAlertTime) >= ALERT_COOLDOWN));
+
+  if (canTriggerAlert && targetLedState != 0) {
+    if (targetLedState == lastAlertLevel) {
+      Serial.print("Same level detected after cooldown: Level ");
+      Serial.println(targetLedState);
     }
+    
+    // Activate the new LED
+    updateLEDs(targetLedState);
+    currentLedState = targetLedState;
+    ledActivated = true;
+    ledActivationTime = currentTime;
+    lastLedChangeTime = currentTime;
 
-    // Check if enough time has passed since last LED change (debounce)
-    bool enoughTimePassedSinceLastChange = (currentTime - lastLedChangeTime) >= LED_HOLD_TIME;
-
-    // Check if any active LED has completed its duration
-    if (ledActivated && currentTime - ledActivationTime >= LED_ON_DURATION) {
-      turnOffAllLEDs();
-      ledActivated = false;
-      currentLedState = 0;
-      Serial.println("LED 60-second active period ended, all LEDs turned off");
-    }
-
-    // Only process new alerts if enough time has passed since last change
-    bool canTriggerAlert = enoughTimePassedSinceLastChange && (!ledActivated || targetLedState != lastAlertLevel || (targetLedState == lastAlertLevel && (currentTime - lastAlertTime) >= ALERT_COOLDOWN));
-
-    if (canTriggerAlert && targetLedState != 0) {
-      if (targetLedState == lastAlertLevel) {
-        Serial.print("Same level detected after cooldown: Level ");
-        Serial.println(targetLedState);
-      }
-
-      // Activate the new LED
-      updateLEDs(targetLedState);
-      currentLedState = targetLedState;
-      ledActivated = true;
-      ledActivationTime = currentTime;
-      lastLedChangeTime = currentTime;
-
-      Serial.print("New LED activated: LED ");
-      Serial.print(currentLedState);
-      Serial.println(" will stay on for 60 seconds");
-    } else if (!enoughTimePassedSinceLastChange && targetLedState != 0) {
-      // Log remaining hold time
-      unsigned long remainingHoldTime = (LED_HOLD_TIME - (currentTime - lastLedChangeTime)) / 1000;
-      Serial.print("Hold time active. ");
-      Serial.print(remainingHoldTime);
-      Serial.println(" seconds remaining before next detection.");
-    } else if (targetLedState == lastAlertLevel && targetLedState != 0) {
-      // Log remaining cooldown time
-      unsigned long remainingCooldown = (ALERT_COOLDOWN - (currentTime - lastAlertTime)) / 1000;
-      Serial.print("Alert cooldown active for level ");
-      Serial.print(targetLedState);
-      Serial.print(". ");
-      Serial.print(remainingCooldown);
-      Serial.println(" seconds remaining.");
-    }
+    Serial.print("New LED activated: LED ");
+    Serial.print(currentLedState);
+    Serial.println(" will stay on for 60 seconds");
+  } else if (!enoughTimePassedSinceLastChange && targetLedState != 0) {
+    // Log remaining hold time
+    unsigned long remainingHoldTime = (LED_HOLD_TIME - (currentTime - lastLedChangeTime)) / 1000;
+    Serial.print("Hold time active. ");
+    Serial.print(remainingHoldTime);
+    Serial.println(" seconds remaining before next detection.");
+  } else if (targetLedState == lastAlertLevel && targetLedState != 0) {
+    // Log remaining cooldown time
+    unsigned long remainingCooldown = (ALERT_COOLDOWN - (currentTime - lastAlertTime)) / 1000;
+    Serial.print("Alert cooldown active for level ");
+    Serial.print(targetLedState);
+    Serial.print(". ");
+    Serial.print(remainingCooldown);
+    Serial.println(" seconds remaining.");
   }
 
   int reading = digitalRead(BTTN_AI);
@@ -439,7 +372,6 @@ void loop() {
     playFloodWarning();  // Optional sound or alert before AI suggestion
 
     // NOW turn off all LEDs after AI suggestion is done
-
     digitalWrite(AI_LED_ONE, LOW);
     digitalWrite(AI_LED_TWO, LOW);
     digitalWrite(AI_LED_THREE, LOW);
@@ -450,94 +382,67 @@ void loop() {
     delay(1000);  // debounce delay
   }
 
-  // Check SMS button with proper debounce
-  int smsReading = digitalRead(BTTN_SMS);
-  
-  // If the button state changed, reset the debouncing timer
-  if (smsReading != smsLastButtonState) {
-    smsLastDebounceTime = millis();
-  }
-  
-  // Check if the button state has been stable for longer than the debounce delay
-  if ((millis() - smsLastDebounceTime) > smsDebounceDelay) {
-    // If the button state has changed
-    if (smsReading != smsButtonState) {
-      smsButtonState = smsReading;
-      
-      // If the button is pressed (LOW because of the pull-up resistor)
-      if (smsButtonState == LOW) {
-        Serial.println("SMS button pressed! Sending SMS...");
-        
-        // LED feedback sequence
-        int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
-        int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
+  if (digitalRead(BTTN_SMS) == LOW) {
+    Serial.println("SMS button pressed!");
 
-        for (int i = 0; i <= 6; i++) {
-          // Turn off all LEDs
-          for (int j = 0; j < 3; j++) {
-            digitalWrite(leds[j], LOW);
-          }
+    int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
+    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 indicates "turn all LEDs on"
 
-          if (sequence[i] == -1) {
-            // Turn all LEDs on
-            delay(100);
-            for (int j = 0; j < 3; j++) {
-              digitalWrite(leds[j], HIGH);
-            }
-          } else {
-            // Turn on the current LED
-            digitalWrite(leds[sequence[i]], HIGH);
-          }
-
-          delay(200);
-        }
-
-        // Update weather and AI suggestion to get the latest data
-        if (WiFi.status() == WL_CONNECTED) {
-          getWeather();
-          getAISuggestion();
-        }
-
-        // Play confirmation sound
-        audio.connecttoFS(SD, "SMS-SENT-VOICE.mp3");
-        while (audio.isRunning()) {
-          audio.loop();
-        }
-
-        // Create weather update message in the same format as sms.ino
-        String weatherMessage = "🚨 FLOOD ALERT! 🚨\n\n";
-        weatherMessage += "📱 System Check:\n\n";
-        weatherMessage += "📍 Location: " + location + "\n";
-        weatherMessage += "🌤️ Weather: " + weatherDescription + "\n";
-        weatherMessage += "🌡️ Temperature: " + String(temperature, 1) + "°C\n";
-        weatherMessage += "🌡️ Feels like: " + String(feelsLike, 1) + "°C\n";
-        weatherMessage += "💧 Humidity: " + String(humidity, 0) + "%\n\n";
-        weatherMessage += "🤖 AI Weather Update:\n" + AISuggestion + "\n\n";
-        weatherMessage += "From: PRAF Technology";
-
-        // Send SMS to all registered numbers
-        if (registeredPhoneNumbers.size() > 0) {
-          Serial.println("Sending weather update SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
-
-          for (String toNumber : registeredPhoneNumbers) {
-            sendHttpSMS(fromSmsNumber, toNumber.c_str(), weatherMessage.c_str());
-            Serial.println("Weather update SMS sent to: " + toNumber);
-            delay(300); // Add a small delay between messages to prevent overloading
-          }
-        } else {
-          Serial.println("No registered numbers to send weather update to");
-        }
-
-        // Turn off LEDs after completion
-        digitalWrite(AI_LED_ONE, LOW);
-        digitalWrite(AI_LED_TWO, LOW);
-        digitalWrite(AI_LED_THREE, LOW);
+    for (int i = 0; i <= 6; i++) {
+      // Turn off all LEDs
+      for (int j = 0; j < 3; j++) {
+        digitalWrite(leds[j], LOW);
       }
+
+      if (sequence[i] == -1) {
+        // Turn all LEDs on
+        delay(100);
+        for (int j = 0; j < 3; j++) {
+          digitalWrite(leds[j], HIGH);
+        }
+      } else {
+        // Turn on the current LED
+        digitalWrite(leds[sequence[i]], HIGH);
+      }
+
+      delay(200);
     }
+
+    // Play confirmation sound
+    audio.connecttoFS(SD, "SMS-SENT-VOICE.mp3");
+    while (audio.isRunning()) {
+      audio.loop();
+    }
+
+    // Create weather update message
+    String weatherMessage = "📱 PRAF WEATHER UPDATE 📱\n\n";
+    weatherMessage += "📍 Location: " + location + "\n";
+    weatherMessage += "🌤️ Weather: " + weatherDescription + "\n";
+    weatherMessage += "🌡️ Temperature: " + String(temperature, 1) + "°C\n";
+    weatherMessage += "🌡️ Feels like: " + String(feelsLike, 1) + "°C\n";
+    weatherMessage += "💧 Humidity: " + String(humidity, 0) + "%\n\n";
+    weatherMessage += "🤖 AI Weather Update:\n" + AISuggestion + "\n\n";
+    weatherMessage += "From: PRAF Technology";
+
+    // Send SMS to all registered numbers
+    if (registeredPhoneNumbers.size() > 0) {
+      Serial.println("Sending weather update SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
+
+      for (String toNumber : registeredPhoneNumbers) {
+        sendHttpSMS(fromSmsNumber, toNumber.c_str(), weatherMessage.c_str());
+        Serial.println("Weather update SMS sent to: " + toNumber);
+      }
+    } else {
+      Serial.println("No registered numbers to send weather update to");
+    }
+
+    delay(1200);  // debounce delay
+
+    digitalWrite(AI_LED_ONE, LOW);
+    digitalWrite(AI_LED_TWO, LOW);
+    digitalWrite(AI_LED_THREE, LOW);
   }
-  
-  // Save the current SMS button reading for the next loop
-  smsLastButtonState = smsReading;
+
 
   // Check if first file is done playing and we need to play the alert
   if (playingFirstFile && !audio.isRunning()) {
@@ -550,7 +455,7 @@ void loop() {
       floodAlertMessage += "📍 Location: " + location + "\n";
       floodAlertMessage += "TIPS: Monitor water levels. Keep valuables elevated. Avoid flood-prone areas.\n\n";
       floodAlertMessage += "From: PRAF Technology";
-
+      
       // Start audio playback first
       audio.connecttoFS(SD, "LOW-ALERT-HIGH.mp3");
       while (audio.isRunning()) {
@@ -561,92 +466,86 @@ void loop() {
         sendHttpSMS(fromSmsNumber, toNumber.c_str(), floodAlertMessage.c_str());
         Serial.println("Flood Alert SMS sent to: " + toNumber);
       }
-
+      
       // Queue SMS to be sent in background
       sendFloodAlert(floodAlertMessage);
       Serial.println(floodAlertMessage);
-
+      
     } else if (currentAlertState == 2) {
       // Create medium flood alert message
       String floodAlertMessage = "🚨 FLOOD ALERT: MEDIUM RISK ⚠️\n\n";
       floodAlertMessage += "📍 Location: " + location + "\n";
       floodAlertMessage += "TIPS: Move to higher ground. Prepare evacuation supplies. Stay informed.\n\n";
       floodAlertMessage += "From: PRAF Technology";
-
+      
       audio.connecttoFS(SD, "MEDIUM-ALERT-HIGH.mp3");
       while (audio.isRunning()) {
         audio.loop();
       }
-
+      
       for (String toNumber : registeredPhoneNumbers) {
         sendHttpSMS(fromSmsNumber, toNumber.c_str(), floodAlertMessage.c_str());
         Serial.println("Medium Flood Alert SMS sent to: " + toNumber);
       }
-
+      
       sendFloodAlert(floodAlertMessage);
       Serial.println(floodAlertMessage);
-
+      
     } else if (currentAlertState == 3) {
       // Create high flood alert message
       String floodAlertMessage = "🚨 FLOOD ALERT: HIGH RISK ⛔\n\n";
       floodAlertMessage += "📍 Location: " + location + "\n";
       floodAlertMessage += "TIPS: Evacuate immediately to designated centers. Follow authorities' instructions.\n\n";
       floodAlertMessage += "From: PRAF Technology";
-
+      
       audio.connecttoFS(SD, "HIGH-ALERT-HIGH.mp3");
       while (audio.isRunning()) {
         audio.loop();
       }
-
+      
       for (String toNumber : registeredPhoneNumbers) {
         sendHttpSMS(fromSmsNumber, toNumber.c_str(), floodAlertMessage.c_str());
         Serial.println("High Flood Alert SMS sent to: " + toNumber);
       }
-
+      
       sendFloodAlert(floodAlertMessage);
       Serial.println(floodAlertMessage);
     }
   }
 
-  // Check WiFi connection periodically and database entries
-  static unsigned long lastWiFiCheckTime = 0;
-  const unsigned long wifiCheckInterval = 30000; // Check WiFi every 30 seconds
-  
-  if (currentTime - lastWiFiCheckTime >= wifiCheckInterval) {
-    lastWiFiCheckTime = currentTime;
-    if (WiFi.status() != WL_CONNECTED) {
-      reconnectWiFi();
-    } else {
-      Serial.println("WiFi connection is stable");
+  // Inside your loop() function, add this:
+  if (currentTime - lastCheckTime >= checkInterval && !audio.isRunning()) {
+    lastCheckTime = currentTime;
+    getNumbers();  // Check for new database entries
+    Serial.println("Registered phone numbers:");
+    for (const String& number : registeredPhoneNumbers) {
+      Serial.println(number);
     }
   }
-  
-  // Check for new database entries less frequently
-  if (currentTime - lastCheckTime >= checkInterval && !audio.isRunning() && WiFi.status() == WL_CONNECTED) {
-    lastCheckTime = currentTime;
-    Serial.println("Checking for new registered phone numbers...");
-    getNumbers();  // Check for new database entries
-  }
-  
+
   audio.loop();
 }
 
-// Function to send an SMS via HTTP
 void sendHttpSMS(const char* from, const char* to, const char* body) {
   Serial.println("Preparing to send SMS...");
+
   WiFiClientSecure client;
   client.setInsecure();
+
   if (!client.connect("api.httpsms.com", 443)) {
     Serial.println("Connection to HttpSMS API failed");
     return;
   }
+
   // Create JSON payload
   DynamicJsonDocument doc(1024);
   doc["content"] = body;
   doc["from"] = from;
   doc["to"] = to;
+
   String jsonPayload;
   serializeJson(doc, jsonPayload);
+
   // Send POST request
   client.println("POST /v1/messages/send HTTP/1.1");
   client.println("Host: api.httpsms.com");
@@ -658,15 +557,18 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
   client.println("Connection: close");
   client.println();
   client.println(jsonPayload);
+
   Serial.println("SMS Request sent!");
+
   // Read and print the response
   Serial.println("Reading SMS API response:");
-  while (client.connected() || client.available()) {
-    if (client.available()) {
-      String line = client.readStringUntil('\n');
-      Serial.println(line);
-    }
-  }
+  // while (client.connected() || client.available()) {
+  //   if (client.available()) {
+  //     String line = client.readStringUntil('\n');
+  //     Serial.println(line);
+  //   }
+  // }
+
   client.stop();
   Serial.println("SMS Connection closed");
 }
@@ -726,17 +628,7 @@ void playFloodWarning() {
 // Function to update LEDs based on the state
 void updateLEDs(int state) {
   unsigned long currentTime = millis();
-
-  // Get the current distance reading for display
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duration = pulseIn(ECHO_PIN, HIGH);
-  float distance = duration / 58.773;
-
+  
   // Check if this is the same alert level and if enough time has passed
   if (state == lastAlertLevel && (currentTime - lastAlertTime) < ALERT_COOLDOWN) {
     // Not enough time has passed since the last alert of this level
@@ -747,168 +639,29 @@ void updateLEDs(int state) {
   // Turn all LEDs off first
   turnOffAllLEDs();
 
-  // Create the flood alert message outside switch for cleaner code
-  String floodAlertMessage = "";
-
   // Then turn on the appropriate LED based on state and send SMS
   switch (state) {
-    case 1:  // LOW ALERT
+    case 1:
       digitalWrite(LED_ONE, HIGH);
       currentAlertState = 1;
-      isAudioPlaying = true;
-      
-      isShowingWeather = false;
-      
-      // Play flood audio notification
+      playingFirstFile = true;
       audio.connecttoFS(SD, "LOW-FLOOD-HIGH.mp3");
-      while (audio.isRunning()) {
-        audio.loop();
-      }
-      
-      // Prepare alert message
-      floodAlertMessage = "🚨 FLOOD ALERT: LOW RISK 💧\n\n";
-      floodAlertMessage += "📍 Location: " + location + "\n";
-      floodAlertMessage += "TIPS: Monitor water levels. Keep valuables elevated. Avoid flood-prone areas.\n\n";
-      floodAlertMessage += "From: PRAF Technology";
-      
-      // Play alert audio
-      audio.connecttoFS(SD, "LOW-ALERT-HIGH.mp3");
-      while (audio.isRunning()) {
-        audio.loop();
-      }
-      
-      // Send SMS to all registered numbers
-      if (registeredPhoneNumbers.size() > 0) {
-        for (int i = 0; i < registeredPhoneNumbers.size(); i++) {
-          String toNumber = registeredPhoneNumbers[i];
-          sendHttpSMS(fromSmsNumber, toNumber.c_str(), floodAlertMessage.c_str());
-          Serial.println("Low Flood Alert SMS sent to: " + toNumber);
-          delay(300); // Small delay between SMS sends
-        }
-      } else {
-        Serial.println("No registered numbers to send flood alert to");
-      }
-      
-      isAudioPlaying = false;
-      
-      // Return to weather display after alert completes
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print(location);
-      lcd.print(", ");
-      lcd.print((int)temperature);
-      lcd.print("'C");
-      lcd.setCursor(0, 1);
-      lcd.print(toTitleCase(weatherDescription));
-      isShowingWeather = true;
-      lastWeatherDisplayTime = millis();
       break;
 
-    case 2:  // MEDIUM ALERT
+    case 2:
       digitalWrite(LED_TWO, HIGH);
       currentAlertState = 2;
-      isAudioPlaying = true;
-      
-      // Display alert on LCD
-      isShowingWeather = false;
-      
-      // Play flood audio notification
-      audio.connecttoFS(SD, "MEDIUM-FLOOD-HIGH2.mp3");
-      while (audio.isRunning()) {
-        audio.loop();
-      }
-      
-      // Prepare alert message
-      floodAlertMessage = "🚨 FLOOD ALERT: MEDIUM RISK ⚠️\n\n";
-      floodAlertMessage += "📍 Location: " + location + "\n";
-      floodAlertMessage += "TIPS: Move to higher ground. Prepare evacuation supplies. Stay informed.\n\n";
-      floodAlertMessage += "From: PRAF Technology";
-      
-      // Play alert audio
-      audio.connecttoFS(SD, "MEDIUM-ALERT-HIGH.mp3");
-      while (audio.isRunning()) {
-        audio.loop();
-      }
-      
-      // Send SMS to all registered numbers
-      if (registeredPhoneNumbers.size() > 0) {
-        for (int i = 0; i < registeredPhoneNumbers.size(); i++) {
-          String toNumber = registeredPhoneNumbers[i];
-          sendHttpSMS(fromSmsNumber, toNumber.c_str(), floodAlertMessage.c_str());
-          Serial.println("Medium Flood Alert SMS sent to: " + toNumber);
-          delay(300); // Small delay between SMS sends
-        }
-      } else {
-        Serial.println("No registered numbers to send flood alert to");
-      }
-      
-      isAudioPlaying = false;
-      
-      // Return to weather display after alert completes
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print(location);
-      lcd.print(", ");
-      lcd.print((int)temperature);
-      lcd.print("'C");
-      lcd.setCursor(0, 1);
-      lcd.print(toTitleCase(weatherDescription));
-      isShowingWeather = true;
-      lastWeatherDisplayTime = millis();
+      playingFirstFile = true;
+      audio.connecttoFS(SD, "MEDIUM-FLOOD-HIGH.mp3");
       break;
 
-    case 3:  // HIGH ALERT
+    case 3:
       digitalWrite(LED_THREE, HIGH);
       currentAlertState = 3;
-      isAudioPlaying = true;
-      
-      // Display alert on LCD
-      isShowingWeather = false;
-      
-      // Play flood audio notification
-      audio.connecttoFS(SD, "HIGH-FLOOD-HIGH2.mp3");
-      while (audio.isRunning()) {
-        audio.loop();
-      }
-      
-      // Prepare alert message
-      floodAlertMessage = "🚨 FLOOD ALERT: HIGH RISK ⛔\n\n";
-      floodAlertMessage += "📍 Location: " + location + "\n";
-      floodAlertMessage += "TIPS: Evacuate immediately to designated centers. Follow authorities' instructions.\n\n";
-      floodAlertMessage += "From: PRAF Technology";
-      
-      // Play alert audio
-      audio.connecttoFS(SD, "HIGH-ALERT-HIGH.mp3");
-      while (audio.isRunning()) {
-        audio.loop();
-      }
-      
-      // Send SMS to all registered numbers
-      if (registeredPhoneNumbers.size() > 0) {
-        for (int i = 0; i < registeredPhoneNumbers.size(); i++) {
-          String toNumber = registeredPhoneNumbers[i];
-          sendHttpSMS(fromSmsNumber, toNumber.c_str(), floodAlertMessage.c_str());
-          Serial.println("High Flood Alert SMS sent to: " + toNumber);
-          delay(300); // Small delay between SMS sends
-        }
-      } else {
-        Serial.println("No registered numbers to send flood alert to");
-      }
-      
-      isAudioPlaying = false;
-      
-      // Return to weather display after alert completes
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print(location);
-      lcd.print(", ");
-      lcd.print((int)temperature);
-      lcd.print("'C");
-      lcd.setCursor(0, 1);
-      lcd.print(toTitleCase(weatherDescription));
-      isShowingWeather = true;
-      lastWeatherDisplayTime = millis();
+      playingFirstFile = true;
+      audio.connecttoFS(SD, "HIGH-FLOOD-HIGH.mp3");
       break;
+      // case 0 or default: all LEDs remain off
   }
 
   // Update the last alert time and level
@@ -921,20 +674,39 @@ void updateLEDs(int state) {
   }
 }
 
-// Modify the sendFloodAlert function to be more reliable
+// Modify the sendFloodAlert function to be non-blocking
 void sendFloodAlert(String alertMessage) {
   if (registeredPhoneNumbers.size() > 0) {
     Serial.println("Sending flood alert SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
-    
-    // Send SMS directly with delays between each to prevent overloading
-    for (int i = 0; i < registeredPhoneNumbers.size(); i++) {
-      String toNumber = registeredPhoneNumbers[i];
-      sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
-      Serial.println("Flood alert SMS sent to: " + toNumber);
-      delay(300); // Small delay between sends
-    }
+    isSendingSMS = true;
+    currentSMSIndex = 0;
+    currentSMSMessage = alertMessage;
+    lastSMSTime = 0; // Reset the timer
   } else {
     Serial.println("No registered numbers to send flood alert to");
+  }
+}
+
+// Add this function to handle non-blocking SMS sending
+void handleSMS() {
+  if (!isSendingSMS) return;
+  
+  unsigned long currentTime = millis();
+  
+  // Check if it's time to send the next SMS
+  if (currentTime - lastSMSTime >= 300) { // 300ms delay between messages
+    if (currentSMSIndex < registeredPhoneNumbers.size()) {
+      String toNumber = registeredPhoneNumbers[currentSMSIndex];
+      sendHttpSMS(fromSmsNumber, toNumber.c_str(), currentSMSMessage.c_str());
+      Serial.println("Flood alert SMS sent to: " + toNumber);
+      currentSMSIndex++;
+      lastSMSTime = currentTime;
+    } else {
+      // All messages sent
+      isSendingSMS = false;
+      currentSMSIndex = 0;
+      currentSMSMessage = "";
+    }
   }
 }
 
@@ -1101,7 +873,7 @@ void getAISuggestion() {
   prompt += "  - Humidity: " + String(humidity, 2) + "%\n\n";
   prompt += "Instructions:\n";
   prompt += "- Write the message like a weather forecast-casual, clear, and understandable for most people.\n";
-  prompt += "- Start with: \"Ayon sa pinakabagong update ng PRAF Technology:";
+  prompt += "- Start with: \"PRAF Technology Weather Update:\".\n";
   prompt += "- Next sentence should note the location/city:\".\n";
   prompt += "- The message should be one sentence long and include a note that it's from PRAF Technology.\n";
   prompt += "- If the weather poses a flood risk, alert the residents.\n";
@@ -1165,78 +937,96 @@ void getAISuggestion() {
 }
 
 void getNumbers() {
-  unsigned long currentTime = millis();
-  
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+  }
+
   // Clear the existing phone numbers array
   registeredPhoneNumbers.clear();
-  
-  // Always use only the specified number regardless of Supabase data
-  registeredPhoneNumbers.push_back("+639516303799");
-  Serial.println("Using fixed number +639516303799 for all SMS communications");
 
-  // No need to query Supabase since we're using a fixed number
-  Serial.print("Total registered numbers: ");
-  Serial.println(registeredPhoneNumbers.size());
-  for (const String& number : registeredPhoneNumbers) {
-    Serial.println(" - " + number);
+  HTTPClient http;
+  String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName;
+
+  http.begin(endpoint);
+  http.addHeader("apikey", supabaseKey);
+  http.addHeader("Authorization", "Bearer " + String(supabaseKey));
+  http.addHeader("Content-Type", "application/json");
+
+  int httpResponseCode = http.GET();
+
+  if (httpResponseCode == 200) {
+    String response = http.getString();
+
+    // Parse JSON response
+    DynamicJsonDocument doc(2048);
+    DeserializationError error = deserializeJson(doc, response);
+
+    if (error) {
+      Serial.print("JSON deserialization failed: ");
+      Serial.println(error.c_str());
+    } else {
+      JsonArray array = doc.as<JsonArray>();
+
+
+      Serial.print("Found ");
+      Serial.print(array.size());
+      Serial.println(" phone numbers.");
+
+      for (JsonVariant entry : array) {
+        int id = entry["id"];
+        String number = entry["number"].as<String>();
+
+        // Add number to our array
+        registeredPhoneNumbers.push_back(number);
+
+        // Add ID to our known IDs list if not already there
+        bool isNewId = true;
+        for (int knownId : knownIds) {
+          if (id == knownId) {
+            isNewId = false;
+            break;
+          }
+        }
+
+        if (isNewId) {
+          digitalWrite(AI_LED_ONE, HIGH);
+          digitalWrite(AI_LED_TWO, HIGH);
+          digitalWrite(AI_LED_THREE, HIGH);
+
+          // Play confirmation sound
+          audio.connecttoFS(SD, "NEW-NUM-REG-HIGH.mp3");
+          while (audio.isRunning()) {
+            audio.loop();
+          }
+
+          knownIds.push_back(id);
+          Serial.print("New Number Added: ");
+          Serial.println(number);
+
+          delay(1500);
+
+          digitalWrite(AI_LED_ONE, LOW);
+          digitalWrite(AI_LED_TWO, LOW);
+          digitalWrite(AI_LED_THREE, LOW);
+        }
+      }
+
+      Serial.print("Total registered numbers: ");
+      Serial.println(registeredPhoneNumbers.size());
+    }
+  } else {
+    Serial.print("Error getting entries. HTTP Response code: ");
+    Serial.println(httpResponseCode);
   }
+
+  http.end();
 }
 
 void reconnectWiFi() {
   Serial.println("WiFi not connected. Attempting to reconnect...");
-  
-  // Try to reconnect a few times
-  int attempts = 0;
-  const int maxAttempts = 5;
-  
-  while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-    WiFi.disconnect(true);
+  while (!WiFi.reconnect()) {
+    Serial.println("Reconnecting to WiFi...");
     delay(500);
-    WiFi.begin(SSID, PASSWORD);
-    
-    // Wait for connection with timeout
-    unsigned long startTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startTime < 5000) {
-      Serial.print(".");
-      delay(500);
-    }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi reconnected successfully!");
-      Serial.print("IP Address: ");
-      Serial.println(WiFi.localIP());
-      return;
-    }
-    
-    attempts++;
-    Serial.print("\nReconnection attempt ");
-    Serial.print(attempts);
-    Serial.print(" of ");
-    Serial.print(maxAttempts);
-    Serial.println(" failed.");
   }
-  
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Failed to reconnect to WiFi after multiple attempts.");
-  }
+  Serial.println("WiFi reconnected.");
 }
-
-String toTitleCase(String text) {
-  bool capitalizeNext = true;
-
-  for (int i = 0; i < text.length(); i++) {
-    char c = text.charAt(i);
-
-    if (isSpace(c)) {
-      capitalizeNext = true;
-    } else if (capitalizeNext && isAlpha(c)) {
-      text.setCharAt(i, toupper(c));
-      capitalizeNext = false;
-    } else {
-      text.setCharAt(i, tolower(c));
-    }
-  }
-
-  return text;
-}
-

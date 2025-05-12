@@ -1,4 +1,4 @@
-    /*
+/*
  * ESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration
  * 
  * This program uses an ESP32 with FreeRTOS to send SMS messages when a button is pressed
@@ -20,11 +20,6 @@
 #include <Audio.h>
 // #include "FS.h"
 
-// Pull in the ESP‐IDF I2S declarations
-extern "C" {
-  #include "driver/i2s.h"
-}
-
 // microSD Card Reader connections
 #define SD_CS_PIN    5
 #define SD_SCK_PIN  18
@@ -45,7 +40,7 @@ extern "C" {
 SPIClass spiSD(VSPI);
 
 // // Create Audio object
-Audio audio;
+// Audio audio;
 // Audio *audio = nullptr;  // no global instantiation
 
 // // Task handle for audio playback
@@ -999,6 +994,8 @@ void buttonTask(void *pvParameters) {
         Serial.println("Button pressed! AI SMS...");
         Serial.println(aiWeatherMessage);
 
+        // listDir(SD, "/", 0);
+
         while (digitalRead(BTTN_AI) == LOW) {
           vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -1112,10 +1109,7 @@ void wifiTask(void *pvParameters) {
           }
           xSemaphoreGive(phoneNumbersMutex);
         }
-      } else {
-        Serial.println("WiFi disconnected. Attempting to reconnect...");
-        WiFi.begin(ssid, password);
-      }
+      }   
     }
   }
 }
@@ -1139,10 +1133,6 @@ void setup() {
   delay(1000);
 
   Serial.println("\nESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration");
-
-  // ——— 1) Uninstall I2S before Wi-Fi comes up ———
-  // This tears down both TX (DAC) and RX (ADC2) channels
-  i2s_driver_uninstall(I2S_NUM_0);                 // frees ADC2 for Wi-Fi :contentReference[oaicite:1]{index=1}
 
   // Connect to WiFi
   Serial.printf("Connecting to %s ", ssid);
@@ -1205,13 +1195,12 @@ void setup() {
   // }
 
   Serial.println("SD card initialized.");
-  listDir(SD, "/", 0);
 
-  // Set up I2S for audio output
-  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  // // Set up I2S for audio output
+  // audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
 
-  // Set volume level (0–100)
-  audio.setVolume(100);
+  // // Set volume level (0–100)
+  // audio.setVolume(100);
 
   // // Play the initial audio file
   // audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
@@ -1281,6 +1270,8 @@ void setup() {
     2,             // Task priority
     &wifiTaskHandle
   );
+
+  listDir(SD, "/", 0);
 
   Serial.println("ESP32 HC-SR04 Distance Sensor with FreeRTOS Started");
 }
