@@ -17,7 +17,10 @@
 #include <LiquidCrystal_I2C.h>
 #include <SPI.h>
 #include <SD.h>
-#include <Audio.h>
+// Audio libraries for MP3 playback
+#include <AudioGeneratorMP3.h>
+#include <AudioFileSourceSD.h>
+#include <AudioOutputI2S.h>
 // #include "FS.h"
 
 // microSD Card Reader connections
@@ -39,26 +42,88 @@
 // Use VSPI (SPIClass HSPI would be SPIClass(HSPI); VSPI is default second bus)
 SPIClass spiSD(VSPI);
 
-// // Create Audio object
-// Audio audio;
-// Audio *audio = nullptr;  // no global instantiation
+// Audio objects
+AudioGeneratorMP3 *mp3 = NULL;
+AudioFileSourceSD *file = NULL;
+AudioOutputI2S *out = NULL;
 
-// // Task handle for audio playback
-// TaskHandle_t audioTaskHandle;
-// 
-// // Audio playback task
-// void audioTask(void *parameter) {
-//   while (true) {
-//     audio.loop();
-// 
-//     if (!audio.isRunning()) {
-//       Serial.println("Restarting audio...");
-//       audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
-//     }
-// 
-//     vTaskDelay(10 / portTICK_PERIOD_MS);
-//   }
-// }
+// Task handle for audio playback
+TaskHandle_t audioTaskHandle;
+
+// Audio playback task
+void audioTask(void *parameter) {
+  Serial.println("Audio Task Started");
+  
+  // Give the SD card time to initialize
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  
+  // Create audio output object
+  out = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S);
+  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  out->SetGain(1.0);
+  
+  // Open the file
+  file = new AudioFileSourceSD("/DEVICE-START-VOICE.mp3");
+  if (!file || file->getSize() <= 0) {
+    Serial.println("Error opening MP3 file");
+    if (file) {
+      delete file;
+      file = NULL;
+    }
+    if (out) {
+      delete out;
+      out = NULL;
+    }
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  // Create MP3 decoder
+  mp3 = new AudioGeneratorMP3();
+  
+  // Start playing
+  if (mp3->begin(file, out)) {
+    Serial.println("MP3 playback started");
+  } else {
+    Serial.println("MP3 playback failed to start");
+    vTaskDelete(NULL);
+  }
+  
+  // Main playback loop
+  while (true) {
+    if (mp3->isRunning()) {
+      if (!mp3->loop()) {
+        // Playback finished
+        Serial.println("MP3 playback finished");
+        mp3->stop();
+        break;
+      }
+    } else {
+      Serial.println("MP3 playback stopped unexpectedly");
+      break;
+    }
+    
+    // Small delay to prevent overwhelming the processor
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  
+  // Cleanup
+  if (mp3) {
+    delete mp3;
+    mp3 = NULL;
+  }
+  if (file) {
+    delete file;
+    file = NULL;
+  }
+  if (out) {
+    delete out;
+    out = NULL;
+  }
+  
+  Serial.println("Audio Task Completed");
+  vTaskDelete(NULL);
+}
 
 // CHECKPOINT
 
@@ -994,8 +1059,6 @@ void buttonTask(void *pvParameters) {
         Serial.println("Button pressed! AI SMS...");
         Serial.println(aiWeatherMessage);
 
-        // listDir(SD, "/", 0);
-
         while (digitalRead(BTTN_AI) == LOW) {
           vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -1115,7 +1178,8 @@ void wifiTask(void *pvParameters) {
 }
 
 void setup() {
-  // Set microSD Card CS pin  pinMode(SD_CS, OUTPUT);
+  // Set microSD Card CS pin  
+  pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
 
   // Initialize serial communication
@@ -1178,42 +1242,49 @@ void setup() {
   // Create queue for button events
   smsQueue = xQueueCreate(5, sizeof(int));
 
+  // Configure I2S pins before SD initialization
+  pinMode(I2S_BCLK, OUTPUT);
+  pinMode(I2S_LRC, OUTPUT);
+  pinMode(I2S_DOUT, OUTPUT);
+
+  // Initialize SPI for SD card with optimized settings
   spiSD.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  if (!SD.begin(SD_CS, spiSD)) {
-    Serial.println("❌ SD init failed");
-    while (1) delay(100);
+  spiSD.setFrequency(16000000); // Increase SPI clock speed for better performance
+  
+  // Initialize SD card with multiple attempts
+  int sdInitAttempts = 0;
+  while (!SD.begin(SD_CS_PIN, spiSD) && sdInitAttempts < 3) {
+    Serial.print("SD Card mount failed. Attempt ");
+    Serial.print(sdInitAttempts + 1);
+    Serial.println(" of 3");
+    delay(500);
+    sdInitAttempts++;
   }
-  Serial.println("✅ SD initialized");
-
-  // // Initialize SPI for SD card
-  // SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
-
-  // // Initialize SD card
-  // if (!SD.begin(SD_CS, SPI)) {
-  //   Serial.println("SD card initialization failed!");
-  //   while (true);
-  // }
-
-  Serial.println("SD card initialized.");
-
-  // // Set up I2S for audio output
-  // audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-
-  // // Set volume level (0–100)
-  // audio.setVolume(100);
-
-  // // Play the initial audio file
-  // audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
-
-  // Create FreeRTOS task for audio playback
-  // xTaskCreate(
-  //   audioTask,           // Task function
-  //   "AudioTask",         // Name
-  //   4096,                // Stack size
-  //   NULL,                // Parameter
-  //   1,                   // Priority
-  //   &audioTaskHandle     // Task handle
-  // );
+  
+  if (sdInitAttempts == 3) {
+    Serial.println("Failed to mount SD Card after 3 attempts");
+  } else {
+    Serial.println("SD card initialized.");
+    
+    // Check if MP3 file exists
+    if (!SD.exists("/DEVICE-START-VOICE.mp3")) {
+      Serial.println("MP3 file not found!");
+      
+      // List files in root directory for debugging
+      listDir(SD, "/", 0);
+    } else {
+      Serial.println("MP3 file found, starting audio task");
+      // Create FreeRTOS task for audio playback
+      xTaskCreate(
+        audioTask,           // Task function
+        "AudioTask",         // Name
+        8192,                // Stack size (increased from 4096 for better stability)
+        NULL,                // Parameter
+        1,                   // Priority
+        &audioTaskHandle     // Task handle
+      );
+    }
+  }
 
   // Create FreeRTOS tasks
   xTaskCreate(
