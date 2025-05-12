@@ -47,7 +47,7 @@ const char* weatherApiKey = "7970309436bc52d518c7e71e314b8053";
 const char* geminiApiKey = "AIzaSyD_g_WAsPqPKxltdOJt8VZw4uu359D3XXA";
 
 // HttpSMS API credentials
-const char* httpSmsApiKey = "iFqOahA-gXvOzLHlt3mHWIs5kLsqQ11FFu8QblKwxKMzDj49mLyw_dpEgMkIDFsS";
+const char* httpSmsApiKey = "MNJmgF7kRvUrTfj4fqDUbrzwoVFpMToWdTbiUx3sQ6jreYnbnu7bym-rQG3kB8_U";
 const char* fromSmsNumber = "+639649687066";
 const char* toSmsNumber = "+639649687066";
 
@@ -114,6 +114,9 @@ unsigned long lastCheckTime = 0;
 const unsigned long checkInterval = 10000;  // Check every 10 seconds
 
 std::vector<String> registeredPhoneNumbers;
+
+// Current water distance reading
+float currentDistance = 0.0;
 
 void setup() {
   Serial.begin(115200);
@@ -221,6 +224,9 @@ void loop() {
 
   long duration = pulseIn(ECHO_PIN, HIGH);
   float distance = duration / 58.773;
+  
+  // Update the current distance global variable for use in SMS messages
+  currentDistance = distance;
 
   // Serial.print("Raw duration: ");
   // Serial.print(duration);
@@ -309,6 +315,15 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
+    // First, get a fresh AI suggestion before playing any sounds
+    Serial.println("Getting fresh AI weather suggestion...");
+    bool suggestionUpdated = getAISuggestion();
+    if (suggestionUpdated) {
+      Serial.println("Successfully updated AI suggestion!");
+    } else {
+      Serial.println("Couldn't update AI suggestion, using existing one");
+    }
+
     // Start playing notification sound immediately
     audio.connecttoFS(SD, "AI-NOTIF.mp3");
 
@@ -353,19 +368,41 @@ void loop() {
 
     Serial.print("isRunning: ");
     Serial.println(isRunning);
-    Serial.print("AISuggestion: ");
-    Serial.println(AISuggestion);
+    
+    // Format a message to display on serial console for visibility
+    String aiStatusMessage = String("🤖 AI WEATHER & FLOOD UPDATE 🤖\n\n") +
+                          "📍 Location: " + location + "\n" +
+                          "🌤️ Current Weather: " + weatherDescription + "\n" +
+                          "🌡️ Temperature: " + String(temperature, 1) + "°C (feels like " + String(feelsLike, 1) + "°C)\n" +
+                          "💧 Humidity: " + String(humidity, 0) + "%\n\n" +
+                          "🚨 Flood Status: ";
+                          
+    // Add flood status information
+    if (currentLedState == 1) {
+      aiStatusMessage += "LOW RISK - Initial flooding detected\n\n";
+    } else if (currentLedState == 2) {
+      aiStatusMessage += "MEDIUM RISK - Significant flooding detected\n\n";
+    } else if (currentLedState == 3) {
+      aiStatusMessage += "HIGH RISK - Severe flooding detected\n\n";
+    } else {
+      aiStatusMessage += "No flooding detected at this time\n\n";
+    }
+    
+    // Add AI suggestion
+    aiStatusMessage += "🤖 AI Recommendation:\n" + AISuggestion;
+    
+    // Print the formatted message to serial
+    Serial.println("\n===============================");
+    Serial.println(aiStatusMessage);
+    Serial.println("===============================\n");
 
     // LEDs REMAIN ON here...
-
-    playFloodWarning();  // Optional sound or alert before AI suggestion
-
+    playFloodWarning();  // Play audio version of AI suggestion
+    
     // NOW turn off all LEDs after AI suggestion is done
     digitalWrite(AI_LED_ONE, LOW);
     digitalWrite(AI_LED_TWO, LOW);
     digitalWrite(AI_LED_THREE, LOW);
-
-    getAISuggestion();  // This might take time — LEDs stay on through it
 
     lastPlayTime = millis();
     delay(1000);  // debounce delay
@@ -374,110 +411,124 @@ void loop() {
   if (digitalRead(BTTN_SMS) == LOW) {
     Serial.println("SMS button pressed!");
 
-    // Test connection first
-    bool connectionOk = testHttpSmsConnection();
-    if (!connectionOk) {
-      Serial.println("HttpSMS API connection test failed! Showing error indication...");
-      
-      // Flash LEDs to indicate error
-      for (int i = 0; i < 5; i++) {
-        digitalWrite(AI_LED_ONE, HIGH);
-        digitalWrite(AI_LED_TWO, HIGH);
-        digitalWrite(AI_LED_THREE, HIGH);
-        delay(200);
-        digitalWrite(AI_LED_ONE, LOW);
-        digitalWrite(AI_LED_TWO, LOW);
-        digitalWrite(AI_LED_THREE, LOW);
-        delay(200);
-      }
-      
-      // Play error sound if available
-      if (SD.exists("/SMS-ERROR.mp3")) {
-        audio.connecttoFS(SD, "SMS-ERROR.mp3");
-        while (audio.isRunning()) {
-          audio.loop();
-        }
-      }
-      
-      delay(1000);
-    } else {
-      // Connection test passed, continue with sending SMS
-      
-      // Start playing notification sound immediately
-      audio.connecttoFS(SD, "SMS-SENT.mp3");
+    // Start playing notification sound immediately
+    audio.connecttoFS(SD, "SMS-SENT.mp3");
 
-      // Define sequence
-      int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
-      int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 = all LEDs on
-      int currentStep = 0;
-      unsigned long previousStepTime = millis();
-      const long stepInterval = 200;
+    // Define sequence
+    int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
+    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 = all LEDs on
+    int currentStep = 0;
+    unsigned long previousStepTime = millis();
+    const long stepInterval = 200;
 
-      // Run LED sequence while audio is playing
-      while (audio.isRunning() || currentStep < 7) {
-        if (audio.isRunning()) {
-          audio.loop();
-        }
-
-        unsigned long currentTime = millis();
-        if (currentTime - previousStepTime >= stepInterval) {
-          previousStepTime = currentTime;
-
-          // Turn off all LEDs before applying the next step
-          if (currentStep < 7) {
-            for (int j = 0; j < 3; j++) {
-              digitalWrite(leds[j], LOW);
-            }
-          }
-
-          if (currentStep < 7) {
-            if (sequence[currentStep] == -1) {
-              // Turn all LEDs ON
-              delay(200);
-              for (int j = 0; j < 3; j++) {
-                digitalWrite(leds[j], HIGH);
-              }
-            } else {
-              digitalWrite(leds[sequence[currentStep]], HIGH);
-            }
-            currentStep++;
-          }
-        }
-      }
-
-      // Create alert message based on current alert state
-      String alertMessage = "FLOOD ALERT! ";
-
-      if (currentLedState == 1) {
-        alertMessage += "LOW FLOOD RISK detected by your PRAF monitoring system.";
-      } else if (currentLedState == 2) {
-        alertMessage += "MEDIUM FLOOD RISK detected by your PRAF monitoring system.";
-      } else if (currentLedState == 3) {
-        alertMessage += "HIGH FLOOD RISK detected! EVACUATE IMMEDIATELY! From your PRAF monitoring system.";
-      } else {
-        alertMessage += "This is a test message from your PRAF flood monitoring system.";
-      }
-
-      // Send SMS to all registered numbers
-      if (registeredPhoneNumbers.size() > 0) {
-        Serial.println("Sending SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
-
-        for (String toNumber : registeredPhoneNumbers) {
-          sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
-          Serial.println("SMS sent to: " + toNumber);
-          delay(300);  // Small delay between sending messages
-        }
-      } else {
-        // Use the default number if no registered numbers
-        sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
-        Serial.println("SMS sent to default number: " + String(toSmsNumber));
-      }
-
-      // Play confirmation sound
-      audio.connecttoFS(SD, "SMS-SENT.mp3");
-      while (audio.isRunning()) {
+    // Run LED sequence while audio is playing
+    while (audio.isRunning() || currentStep < 7) {
+      if (audio.isRunning()) {
         audio.loop();
       }
+
+      unsigned long currentTime = millis();
+      if (currentTime - previousStepTime >= stepInterval) {
+        previousStepTime = currentTime;
+
+        // Turn off all LEDs before applying the next step
+        if (currentStep < 7) {
+          for (int j = 0; j < 3; j++) {
+            digitalWrite(leds[j], LOW);
+          }
+        }
+
+        if (currentStep < 7) {
+          if (sequence[currentStep] == -1) {
+            // Turn all LEDs ON
+            delay(200);
+            for (int j = 0; j < 3; j++) {
+              digitalWrite(leds[j], HIGH);
+            }
+          } else {
+            digitalWrite(leds[sequence[currentStep]], HIGH);
+          }
+          currentStep++;
+        }
+      }
+    }
+
+    // Create alert message based on current alert state
+    String alertMessage = "";
+    float distance = currentDistance; // Get current water level reading
+
+    if (currentLedState == 1) {
+      alertMessage = String("⚠️ FLOOD ALERT - LEVEL 1 ⚠️\n\n") +
+                    "📍 Location: " + location + "\n" +
+                    "🔍 Current water level: " + String(distance, 1) + " cm\n" +
+                    "⚠️ Status: ALERT - Initial flooding detected\n\n" +
+                    "🚨 PRECAUTIONS:\n" +
+                    "- Monitor water levels\n" +
+                    "- Prepare emergency supplies\n" +
+                    "- Stay tuned for updates\n\n" +
+                    "From: PRAF Technology Flood Monitoring System";
+    } else if (currentLedState == 2) {
+      alertMessage = String("🔴 FLOOD CRITICAL - LEVEL 2 🔴\n\n") +
+                    "📍 Location: " + location + "\n" +
+                    "🔍 Current water level: " + String(distance, 1) + " cm\n" +
+                    "⚠️ Status: CRITICAL - Significant flooding\n\n" +
+                    "🚨 URGENT ACTIONS REQUIRED:\n" +
+                    "- Move valuables to higher ground\n" +
+                    "- Prepare for possible evacuation\n" +
+                    "- Avoid flooded areas\n" +
+                    "- Charge communication devices\n\n" +
+                    "From: PRAF Technology Flood Monitoring System";
+    } else if (currentLedState == 3) {
+      alertMessage = String("🚨 FLOOD WARNING - LEVEL 3 🚨\n\n") +
+                    "📍 Location: " + location + "\n" +
+                    "🔍 Current water level: " + String(distance, 1) + " cm\n" +
+                    "⚠️ Status: WARNING - Severe flooding\n\n" +
+                    "🚨 EMERGENCY ACTIONS REQUIRED:\n" +
+                    "- EVACUATE immediately if instructed\n" +
+                    "- Move to higher ground NOW\n" +
+                    "- Follow emergency routes\n" +
+                    "- Do NOT attempt to cross floodwaters\n" +
+                    "- Call emergency services if trapped\n\n" +
+                    "From: PRAF Technology Flood Monitoring System";
+    } else {
+      // Default message when no flood level is active
+      alertMessage = String("🚨 FLOOD ALERT! 🚨\n\n") +
+                    "📱 System Check:\n\n" +
+                    "📍 Location: " + location + "\n" +
+                    "🌤️ Weather: " + weatherDescription + "\n" +
+                    "🌡️ Temperature: " + String(temperature, 1) + "°C\n" +
+                    "🌡️ Feels like: " + String(feelsLike, 1) + "°C\n" +
+                    "💧 Humidity: " + String(humidity, 0) + "%\n\n" +
+                    "🤖 AI Weather Update:\n" +
+                    AISuggestion + "\n\n" +
+                    "From: PRAF Technology";
+    }
+
+    // Ensure WiFi is connected before sending SMS
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi disconnected. Attempting to reconnect...");
+      reconnectWiFi();
+    }
+
+    // Send SMS to all registered numbers
+    if (registeredPhoneNumbers.size() > 0) {
+      Serial.println("📲 Sending SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
+
+      for (String toNumber : registeredPhoneNumbers) {
+        sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
+        Serial.println("✅ SMS sent to: " + toNumber);
+        delay(300);  // Small delay between sending messages
+      }
+    } else {
+      // Use the default number if no registered numbers
+      sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
+      Serial.println("✅ SMS sent to default number: " + String(toSmsNumber));
+    }
+
+    // Play confirmation sound
+    audio.connecttoFS(SD, "SMS-SENT.mp3");
+    while (audio.isRunning()) {
+      audio.loop();
     }
 
     delay(1200);  // debounce delay
@@ -515,68 +566,36 @@ void loop() {
 }
 
 void sendHttpSMS(const char* from, const char* to, const char* body) {
-  Serial.println("Preparing to send SMS...");
-  
-  // Check WiFi connection first
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected! Attempting to reconnect...");
-    reconnectWiFi();
-    
-    // If still not connected after reconnect attempt, abort
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Failed to reconnect WiFi. SMS cannot be sent.");
-      return;
-    }
-  }
-  
-  // Print WiFi signal strength
-  long rssi = WiFi.RSSI();
-  Serial.print("WiFi signal strength (RSSI): ");
-  Serial.print(rssi);
-  Serial.println(" dBm");
+  Serial.print("📱 Sending SMS to: ");
+  Serial.println(to);
   
   WiFiClientSecure client;
-  client.setInsecure();  // Accept any certificate
-  client.setTimeout(15000); // Set a longer timeout (15 seconds)
+  client.setInsecure();
+  client.setTimeout(10); // Set a lower timeout to prevent blocking too long
   
-  Serial.println("Connecting to HttpSMS API...");
-  
-  // Try to connect multiple times
-  int retries = 3;
-  bool connected = false;
-  
-  while (retries > 0 && !connected) {
-    if (client.connect("api.httpsms.com", 443)) {
-      connected = true;
-      Serial.println("Connected to HttpSMS API successfully!");
-    } else {
-      Serial.print("Connection attempt failed. Retries left: ");
-      Serial.println(retries);
-      retries--;
-      delay(1000); // Wait before retrying
-    }
+  Serial.println("🔄 Connecting to SMS API...");
+  int retry = 0;
+  while (!client.connect("api.httpsms.com", 443) && retry < 3) {
+    Serial.println("Connection to HttpSMS API failed, retrying...");
+    delay(100); // Short delay before retry
+    retry++;
   }
   
-  if (!connected) {
+  if (retry >= 3) {
     Serial.println("Connection to HttpSMS API failed after multiple attempts");
     return;
   }
-
+  
   // Create JSON payload
   DynamicJsonDocument doc(1024);
   doc["content"] = body;
   doc["from"] = from;
   doc["to"] = to;
-
   String jsonPayload;
   serializeJson(doc, jsonPayload);
+  doc.clear(); // Free memory immediately
   
-  // Print the JSON payload for debugging
-  Serial.println("JSON Payload:");
-  Serial.println(jsonPayload);
-
   // Send POST request
-  Serial.println("Sending HTTP POST request...");
   client.println("POST /v1/messages/send HTTP/1.1");
   client.println("Host: api.httpsms.com");
   client.print("x-api-key: ");
@@ -586,30 +605,23 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
   client.println(jsonPayload.length());
   client.println("Connection: close");
   client.println();
-  client.print(jsonPayload);  // Changed from println to print to avoid extra newline
-
+  client.println(jsonPayload);
+  
   Serial.println("SMS Request sent!");
-
-  // Wait for the server to respond with a timeout
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 10000) {
-      Serial.println(">>> Client Timeout !");
-      client.stop();
-      return;
-    }
-    delay(50);
-  }
-
-  // Read and print the response
+  
+  // Read and print the response with proper timing
   Serial.println("Reading SMS API response:");
-  while (client.connected() || client.available()) {
+  unsigned long timeout = millis();
+  while ((client.connected() || client.available()) && millis() - timeout < 5000) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
       Serial.println(line);
+    } else {
+      // Short delay while waiting for data
+      delay(10);
     }
   }
-
+  
   client.stop();
   Serial.println("SMS Connection closed");
 }
@@ -663,7 +675,7 @@ void speakTextInChunks(String text, int maxLength) {
 }
 
 void playFloodWarning() {
-  speakTextInChunks(AISuggestion, 100);  // Split into chunks of ~100 characters
+  speakTextInChunks(AISuggestion, 100);
 }
 
 // Function to update LEDs based on the state
@@ -869,12 +881,25 @@ bool getWeather() {
   return success;
 }
 
-void getAISuggestion() {
+bool getAISuggestion() {
   if (WiFi.status() != WL_CONNECTED) {
-    return;
+    Serial.println("❌ WiFi not connected. Cannot get AI suggestion.");
+    return false;
   }
 
   HTTPClient http;
+  bool success = false;
+  
+  Serial.println("🤖 Requesting AI weather suggestion...");
+
+  // Make sure we have reasonable weather data
+  if (temperature == 0.0 || weatherDescription.length() == 0) {
+    if (getWeather()) {
+      Serial.println("✅ Weather data refreshed successfully");
+    } else {
+      Serial.println("⚠️ Could not refresh weather data, using default values");
+    }
+  }
 
   String prompt = "Provide a short and helpful suggestion to inform residents about the current weather and keep them safe.\n\n";
   prompt += "- Weather Details:\n";
@@ -883,6 +908,20 @@ void getAISuggestion() {
   prompt += "  - Temperature: " + String(temperature, 2) + "°C\n";
   prompt += "  - Feels like: " + String(feelsLike, 2) + "°C\n";
   prompt += "  - Humidity: " + String(humidity, 2) + "%\n\n";
+  
+  // Add flood status information to the prompt
+  prompt += "- Current Water Level Status:\n";
+  if (currentLedState == 1) {
+    prompt += "  - LOW FLOOD RISK detected\n";
+  } else if (currentLedState == 2) {
+    prompt += "  - MEDIUM FLOOD RISK detected\n";
+  } else if (currentLedState == 3) {
+    prompt += "  - HIGH FLOOD RISK detected - EMERGENCY SITUATION\n";
+  } else {
+    prompt += "  - No flooding detected at this time\n";
+  }
+  prompt += "\n";
+
   prompt += "Instructions:\n";
   prompt += "- Write the message like a weather forecast-casual, clear, and understandable for most people.\n";
   prompt += "- Start with: \"PRAF Technology Weather Update:\".\n";
@@ -916,6 +955,9 @@ void getAISuggestion() {
 
   String geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + String(geminiApiKey);
 
+  // Set a timeout value for the HTTP request
+  http.setTimeout(10000); // 10 second timeout
+
   http.begin(geminiUrl);
   http.addHeader("Content-Type", "application/json");
 
@@ -923,29 +965,51 @@ void getAISuggestion() {
 
   if (httpCode == HTTP_CODE_OK) {
     String payload = http.getString();
-    Serial.println("Gemini API Response: " + payload);
+    Serial.println("🔄 Gemini API Response received");
 
     StaticJsonDocument<2048> responseDoc;
     DeserializationError error = deserializeJson(responseDoc, payload);
 
-    if (!error && responseDoc.containsKey("candidates") && responseDoc["candidates"][0].containsKey("content") && responseDoc["candidates"][0]["content"].containsKey("parts") && responseDoc["candidates"][0]["content"]["parts"][0].containsKey("text")) {
+    if (!error && responseDoc.containsKey("candidates") && 
+        responseDoc["candidates"][0].containsKey("content") && 
+        responseDoc["candidates"][0]["content"].containsKey("parts") && 
+        responseDoc["candidates"][0]["content"]["parts"][0].containsKey("text")) {
 
       String aiMessage = responseDoc["candidates"][0]["content"]["parts"][0]["text"].as<String>();
-      AISuggestion = aiMessage;
-
-      Serial.println("\n==== AI WEATHER SUGGESTION ====");
-      Serial.println(aiMessage);
-      Serial.println("===============================\n");
+      
+      // Verify we got a non-empty response before updating
+      if (aiMessage.length() > 0) {
+        AISuggestion = aiMessage;
+        Serial.println("\n==== 🤖 AI WEATHER SUGGESTION 🤖 ====");
+        Serial.println(aiMessage);
+        Serial.println("======================================\n");
+        success = true;
+      } else {
+        Serial.println("❌ Received empty response from Gemini API");
+      }
     } else {
-      Serial.println("Error parsing Gemini API response");
+      Serial.println("❌ Error parsing Gemini API response");
+      if (error) {
+        Serial.print("DeserializationError: ");
+        Serial.println(error.c_str());
+      }
     }
   } else {
-    Serial.print("Failed to connect to Gemini API, HTTP code: ");
+    Serial.print("❌ Failed to connect to Gemini API, HTTP code: ");
     Serial.println(httpCode);
     Serial.println("Request Body: " + requestBody);
   }
 
   http.end();
+  
+  // If API call failed but we have an existing AI suggestion, we can still return true
+  // to indicate we can continue with what we have
+  if (!success && AISuggestion.length() > 0) {
+    Serial.println("⚠️ Using existing AI suggestion as fallback");
+    return true;
+  }
+  
+  return success;
 }
 
 void getNumbers() {
@@ -978,7 +1042,6 @@ void getNumbers() {
       Serial.println(error.c_str());
     } else {
       JsonArray array = doc.as<JsonArray>();
-
 
       Serial.print("Found ");
       Serial.print(array.size());
@@ -1028,6 +1091,8 @@ void getNumbers() {
   http.end();
 }
 
+// CHECKPOINT #2
+
 void reconnectWiFi() {
   Serial.println("WiFi not connected. Attempting to reconnect...");
   while (!WiFi.reconnect()) {
@@ -1035,66 +1100,4 @@ void reconnectWiFi() {
     delay(500);
   }
   Serial.println("WiFi reconnected.");
-}
-
-// Add this function after the sendHttpSMS function
-bool testHttpSmsConnection() {
-  Serial.println("Testing HttpSMS API connection...");
-  
-  // Check WiFi first
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected for API test!");
-    return false;
-  }
-  
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(10000);
-  
-  Serial.println("Connecting to api.httpsms.com...");
-  if (!client.connect("api.httpsms.com", 443)) {
-    Serial.println("Test connection failed!");
-    return false;
-  }
-  
-  // Simple HEAD request to test connection
-  client.println("HEAD / HTTP/1.1");
-  client.println("Host: api.httpsms.com");
-  client.println("Connection: close");
-  client.println();
-  
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println(">>> Test timeout!");
-      client.stop();
-      return false;
-    }
-    delay(50);
-  }
-  
-  // Read response headers
-  bool success = false;
-  while (client.available()) {
-    String line = client.readStringUntil('\n');
-    Serial.println(line);
-    if (line.startsWith("HTTP/1.1")) {
-      if (line.indexOf("200") > 0 || line.indexOf("302") > 0) {
-        success = true;
-      }
-    }
-    if (line.length() == 1) { // Empty line (end of headers)
-      break;
-    }
-  }
-  
-  client.stop();
-  
-  if (success) {
-    Serial.println("HttpSMS API connection test successful!");
-  } else {
-    Serial.println("HttpSMS API connection test failed!");
-  }
-  
-  return success;
 }

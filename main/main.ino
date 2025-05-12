@@ -6,6 +6,8 @@
  * and includes current weather information in the message
  */
 
+// CHECKPOINT
+
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
@@ -49,6 +51,13 @@ AudioOutputI2S *out = NULL;
 
 // Task handle for audio playback
 TaskHandle_t audioTaskHandle;
+QueueHandle_t audioQueue = NULL;  // Queue for audio events
+
+// Audio file paths
+#define AUDIO_STARTUP "/DEVICE-START-VOICE.mp3"
+#define AUDIO_ALERT "/LOW-FLOOD-HIGH.mp3"
+#define AUDIO_CRITICAL "/MEDIUM-FLOOD-HIGH2.mp3"
+#define AUDIO_WARNING "/HIGH-FLOOD-HIGH2.mp3"
 
 // Audio playback task
 void audioTask(void *parameter) {
@@ -62,10 +71,10 @@ void audioTask(void *parameter) {
   out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
   out->SetGain(1.0);
   
-  // Open the file
-  file = new AudioFileSourceSD("/DEVICE-START-VOICE.mp3");
+  // Open the startup file
+  file = new AudioFileSourceSD(AUDIO_STARTUP);
   if (!file || file->getSize() <= 0) {
-    Serial.println("Error opening MP3 file");
+    Serial.println("Error opening startup MP3 file");
     if (file) {
       delete file;
       file = NULL;
@@ -116,6 +125,106 @@ void audioTask(void *parameter) {
     delete file;
     file = NULL;
   }
+  if (out) {
+    delete out;
+    out = NULL;
+  }
+  
+  // Now enter the main audio queue processing loop
+  int audioEvent;
+  
+  // Create a new audio output object for subsequent playbacks
+  out = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S);
+  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  out->SetGain(1.0);
+  
+  while (true) {
+    // Wait for audio events from the queue
+    if (xQueueReceive(audioQueue, &audioEvent, portMAX_DELAY)) {
+      Serial.print("Received audio event: ");
+      Serial.println(audioEvent);
+      
+      const char* audioFile;
+      
+      // Determine which audio file to play based on the event
+      switch (audioEvent) {
+        case 1:  // Alert (Level 1)
+          audioFile = AUDIO_ALERT;
+          break;
+        case 2:  // Critical (Level 2)
+          audioFile = AUDIO_CRITICAL;
+          break;
+        case 3:  // Warning (Level 3)
+          audioFile = AUDIO_WARNING;
+          break;
+        default:
+          audioFile = AUDIO_STARTUP;
+          break;
+      }
+      
+      // Check if the file exists
+      if (!SD.exists(audioFile)) {
+        Serial.print("Audio file not found: ");
+        Serial.println(audioFile);
+        continue;  // Skip to the next event
+      }
+      
+      // Open the audio file
+      file = new AudioFileSourceSD(audioFile);
+      if (!file || file->getSize() <= 0) {
+        Serial.print("Error opening MP3 file: ");
+        Serial.println(audioFile);
+        if (file) {
+          delete file;
+          file = NULL;
+        }
+        continue;  // Skip to the next event
+      }
+      
+      // Create MP3 decoder if not already created
+      if (!mp3) {
+        mp3 = new AudioGeneratorMP3();
+      }
+      
+      // Start playing
+      if (mp3->begin(file, out)) {
+        Serial.print("MP3 playback started: ");
+        Serial.println(audioFile);
+      } else {
+        Serial.println("MP3 playback failed to start");
+        if (file) {
+          delete file;
+          file = NULL;
+        }
+        continue;  // Skip to the next event
+      }
+      
+      // Play until the file ends
+      while (mp3->isRunning()) {
+        if (!mp3->loop()) {
+          Serial.println("MP3 playback finished");
+          mp3->stop();
+          break;
+        }
+        
+        // Small delay to prevent overwhelming the processor
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+      
+      // Cleanup
+      if (mp3) {
+        mp3->stop();
+        delete mp3;
+        mp3 = NULL;
+      }
+      if (file) {
+        delete file;
+        file = NULL;
+      }
+    }
+  }
+  
+  // Final cleanup (this part should never be reached)
   if (out) {
     delete out;
     out = NULL;
@@ -383,6 +492,17 @@ void controlOutputsTask(void *parameter) {
       digitalWrite(LED_ONE, currentRange == 1 ? HIGH : LOW);
       digitalWrite(LED_TWO, currentRange == 2 ? HIGH : LOW);
       digitalWrite(LED_THREE, currentRange == 3 ? HIGH : LOW);
+      
+      // Queue audio event based on the current range
+      if (audioQueue != NULL) {
+        // Send the current range as the audio event
+        if (xQueueSend(audioQueue, &currentRange, 0) != pdTRUE) {
+          Serial.println("Failed to queue audio event - queue might be full");
+        } else {
+          Serial.print("Queued audio for flood level ");
+          Serial.println(currentRange);
+        }
+      }
       
       // Lock the LCD text for 5 seconds
       lcdTextLocked = true;
@@ -1040,32 +1160,24 @@ void buttonTask(void *pvParameters) {
   esp_task_wdt_delete(NULL); // Remove current task from WDT watch
   
   int lastButtonState = HIGH;
+  int lastAiButtonState = HIGH;
   unsigned long lastDebounceTime = 0;
+  unsigned long lastAiDebounceTime = 0;
   
   while (1) {
     int reading = digitalRead(BTTN_SMS);
-    int ai = digitalRead(BTTN_AI);
+    int aiReading = digitalRead(BTTN_AI);
     
-    // If button state changed
+    // Handle SMS button
     if (reading != lastButtonState) {
       lastDebounceTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
     }
 
-    
     // If enough time has passed since last state change
     if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastDebounceTime) > DEBOUNCE_DELAY) {
       // If button is pressed (LOW)
-      if (ai == LOW) {
-        Serial.println("Button pressed! AI SMS...");
-        Serial.println(aiWeatherMessage);
-
-        while (digitalRead(BTTN_AI) == LOW) {
-          vTaskDelay(pdMS_TO_TICKS(10));
-        }
-      }
-
       if (reading == LOW) {
-        Serial.println("Button pressed! Queueing SMS...");
+        Serial.println("SMS button pressed! Queueing SMS...");
         // Send a message to the queue
         int signalValue = 1;
         xQueueSend(smsQueue, &signalValue, 0);
@@ -1077,7 +1189,37 @@ void buttonTask(void *pvParameters) {
       }
     }
     
+    // Handle AI button
+    if (aiReading != lastAiButtonState) {
+      lastAiDebounceTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    }
+    
+    // If enough time has passed since last AI button state change
+    if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastAiDebounceTime) > DEBOUNCE_DELAY) {
+      // If AI button is pressed (LOW)
+      if (aiReading == LOW) {
+        Serial.println("AI button pressed! Playing audio for current flood level...");
+        
+        // Play audio for the current flood level (or startup sound if no level is active)
+        if (activeState >= 1 && activeState <= 3) {
+          playAudioForFloodLevel(activeState);
+        } else {
+          // Play default/startup sound by sending a value outside the range 1-3
+          int defaultSound = 0;
+          if (audioQueue != NULL) {
+            xQueueSend(audioQueue, &defaultSound, 0);
+          }
+        }
+        
+        // Wait for button release to prevent multiple triggers
+        while (digitalRead(BTTN_AI) == LOW) {
+          vTaskDelay(pdMS_TO_TICKS(10));
+        }
+      }
+    }
+    
     lastButtonState = reading;
+    lastAiButtonState = aiReading;
     vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent task starvation
   }
 }
@@ -1177,6 +1319,45 @@ void wifiTask(void *pvParameters) {
   }
 }
 
+// Function to queue audio playback for a specific flood level
+void playAudioForFloodLevel(int level) {
+  if (audioQueue != NULL) {
+    // Ensure level is within valid range (1-3)
+    if (level >= 1 && level <= 3) {
+      // Check if the corresponding audio file exists
+      const char* audioFile;
+      
+      switch (level) {
+        case 1:
+          audioFile = AUDIO_ALERT;
+          break;
+        case 2:
+          audioFile = AUDIO_CRITICAL;
+          break;
+        case 3:
+          audioFile = AUDIO_WARNING;
+          break;
+        default:
+          audioFile = AUDIO_STARTUP;
+          break;
+      }
+      
+      if (!SD.exists(audioFile)) {
+        Serial.print("Cannot play audio - file not found: ");
+        Serial.println(audioFile);
+        return;
+      }
+      
+      if (xQueueSend(audioQueue, &level, 0) != pdTRUE) {
+        Serial.println("Failed to queue audio event - queue might be full");
+      } else {
+        Serial.print("Manually queued audio for flood level ");
+        Serial.println(level);
+      }
+    }
+  }
+}
+
 void setup() {
   // Set microSD Card CS pin  
   pinMode(SD_CS, OUTPUT);
@@ -1241,6 +1422,9 @@ void setup() {
   
   // Create queue for button events
   smsQueue = xQueueCreate(5, sizeof(int));
+  
+  // Create queue for audio events
+  audioQueue = xQueueCreate(5, sizeof(int));
 
   // Configure I2S pins before SD initialization
   pinMode(I2S_BCLK, OUTPUT);
@@ -1266,23 +1450,51 @@ void setup() {
   } else {
     Serial.println("SD card initialized.");
     
-    // Check if MP3 file exists
-    if (!SD.exists("/DEVICE-START-VOICE.mp3")) {
-      Serial.println("MP3 file not found!");
-      
+    // Check if all MP3 files exist
+    bool allFilesExist = true;
+    
+    if (!SD.exists(AUDIO_STARTUP)) {
+      Serial.println("Startup audio file not found!");
+      allFilesExist = false;
+    }
+    
+    if (!SD.exists(AUDIO_ALERT)) {
+      Serial.println("Alert audio file not found!");
+      allFilesExist = false;
+    }
+    
+    if (!SD.exists(AUDIO_CRITICAL)) {
+      Serial.println("Critical audio file not found!");
+      allFilesExist = false;
+    }
+    
+    if (!SD.exists(AUDIO_WARNING)) {
+      Serial.println("Warning audio file not found!");
+      allFilesExist = false;
+    }
+    
+    if (!allFilesExist) {
       // List files in root directory for debugging
       listDir(SD, "/", 0);
-    } else {
-      Serial.println("MP3 file found, starting audio task");
-      // Create FreeRTOS task for audio playback
-      xTaskCreate(
-        audioTask,           // Task function
-        "AudioTask",         // Name
-        8192,                // Stack size (increased from 4096 for better stability)
-        NULL,                // Parameter
-        1,                   // Priority
-        &audioTaskHandle     // Task handle
-      );
+    }
+    
+    // Start audio task
+    Serial.println("Starting audio task");
+    xTaskCreate(
+      audioTask,           // Task function
+      "AudioTask",         // Name
+      8192,                // Stack size (increased for better stability)
+      NULL,                // Parameter
+      1,                   // Priority
+      &audioTaskHandle     // Task handle
+    );
+    
+    // Queue startup sound to be played
+    int startupSound = 0; // 0 indicates startup sound
+    if (audioQueue != NULL) {
+      if (xQueueSend(audioQueue, &startupSound, 0) == pdTRUE) {
+        Serial.println("Queued startup sound");
+      }
     }
   }
 
