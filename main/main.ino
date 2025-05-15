@@ -6,7 +6,7 @@
  * and includes current weather information in the message
  */
 
-// CHECKPOINT
+// ACTUALLY CHECKPOINT
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -19,11 +19,8 @@
 #include <LiquidCrystal_I2C.h>
 #include <SPI.h>
 #include <SD.h>
-// Audio libraries for MP3 playback
-#include <AudioGeneratorMP3.h>
-#include <AudioFileSourceSD.h>
-#include <AudioOutputI2S.h>
-// #include "FS.h"
+#include "AudioTools.h"
+#include "AudioTools/AudioCodecs/CodecMP3Helix.h"
 
 // microSD Card Reader connections
 #define SD_CS_PIN    5
@@ -44,195 +41,33 @@
 // Use VSPI (SPIClass HSPI would be SPIClass(HSPI); VSPI is default second bus)
 SPIClass spiSD(VSPI);
 
-// Audio objects
-AudioGeneratorMP3 *mp3 = NULL;
-AudioFileSourceSD *file = NULL;
-AudioOutputI2S *out = NULL;
+// Create instances for audio components
+I2SStream i2sStream;
+MP3DecoderHelix mp3Decoder;
+EncodedAudioStream decoder(&i2sStream, &mp3Decoder);
+File mp3File;
+StreamCopy copier;
 
-// Task handle for audio playback
-TaskHandle_t audioTaskHandle;
-QueueHandle_t audioQueue = NULL;  // Queue for audio events
+// // Create Audio object
+// Audio audio;
+// Audio *audio = nullptr;  // no global instantiation
 
-// Audio file paths
-#define AUDIO_STARTUP "/DEVICE-START-VOICE.mp3"
-#define AUDIO_ALERT "/LOW-FLOOD-HIGH.mp3"
-#define AUDIO_CRITICAL "/MEDIUM-FLOOD-HIGH2.mp3"
-#define AUDIO_WARNING "/HIGH-FLOOD-HIGH2.mp3"
-
-// Audio playback task
-void audioTask(void *parameter) {
-  Serial.println("Audio Task Started");
-  
-  // Give the SD card time to initialize
-  vTaskDelay(pdMS_TO_TICKS(1000));
-  
-  // Create audio output object
-  out = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S);
-  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  out->SetGain(1.0);
-  
-  // Open the startup file
-  file = new AudioFileSourceSD(AUDIO_STARTUP);
-  if (!file || file->getSize() <= 0) {
-    Serial.println("Error opening startup MP3 file");
-    if (file) {
-      delete file;
-      file = NULL;
-    }
-    if (out) {
-      delete out;
-      out = NULL;
-    }
-    vTaskDelete(NULL);
-    return;
-  }
-  
-  // Create MP3 decoder
-  mp3 = new AudioGeneratorMP3();
-  
-  // Start playing
-  if (mp3->begin(file, out)) {
-    Serial.println("MP3 playback started");
-  } else {
-    Serial.println("MP3 playback failed to start");
-    vTaskDelete(NULL);
-  }
-  
-  // Main playback loop
-  while (true) {
-    if (mp3->isRunning()) {
-      if (!mp3->loop()) {
-        // Playback finished
-        Serial.println("MP3 playback finished");
-        mp3->stop();
-        break;
-      }
-    } else {
-      Serial.println("MP3 playback stopped unexpectedly");
-      break;
-    }
-    
-    // Small delay to prevent overwhelming the processor
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-  
-  // Cleanup
-  if (mp3) {
-    delete mp3;
-    mp3 = NULL;
-  }
-  if (file) {
-    delete file;
-    file = NULL;
-  }
-  if (out) {
-    delete out;
-    out = NULL;
-  }
-  
-  // Now enter the main audio queue processing loop
-  int audioEvent;
-  
-  // Create a new audio output object for subsequent playbacks
-  out = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S);
-  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  out->SetGain(1.0);
-  
-  while (true) {
-    // Wait for audio events from the queue
-    if (xQueueReceive(audioQueue, &audioEvent, portMAX_DELAY)) {
-      Serial.print("Received audio event: ");
-      Serial.println(audioEvent);
-      
-      const char* audioFile;
-      
-      // Determine which audio file to play based on the event
-      switch (audioEvent) {
-        case 1:  // Alert (Level 1)
-          audioFile = AUDIO_ALERT;
-          break;
-        case 2:  // Critical (Level 2)
-          audioFile = AUDIO_CRITICAL;
-          break;
-        case 3:  // Warning (Level 3)
-          audioFile = AUDIO_WARNING;
-          break;
-        default:
-          audioFile = AUDIO_STARTUP;
-          break;
-      }
-      
-      // Check if the file exists
-      if (!SD.exists(audioFile)) {
-        Serial.print("Audio file not found: ");
-        Serial.println(audioFile);
-        continue;  // Skip to the next event
-      }
-      
-      // Open the audio file
-      file = new AudioFileSourceSD(audioFile);
-      if (!file || file->getSize() <= 0) {
-        Serial.print("Error opening MP3 file: ");
-        Serial.println(audioFile);
-        if (file) {
-          delete file;
-          file = NULL;
-        }
-        continue;  // Skip to the next event
-      }
-      
-      // Create MP3 decoder if not already created
-      if (!mp3) {
-        mp3 = new AudioGeneratorMP3();
-      }
-      
-      // Start playing
-      if (mp3->begin(file, out)) {
-        Serial.print("MP3 playback started: ");
-        Serial.println(audioFile);
-      } else {
-        Serial.println("MP3 playback failed to start");
-        if (file) {
-          delete file;
-          file = NULL;
-        }
-        continue;  // Skip to the next event
-      }
-      
-      // Play until the file ends
-      while (mp3->isRunning()) {
-        if (!mp3->loop()) {
-          Serial.println("MP3 playback finished");
-          mp3->stop();
-          break;
-        }
-        
-        // Small delay to prevent overwhelming the processor
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-      
-      // Cleanup
-      if (mp3) {
-        mp3->stop();
-        delete mp3;
-        mp3 = NULL;
-      }
-      if (file) {
-        delete file;
-        file = NULL;
-      }
-    }
-  }
-  
-  // Final cleanup (this part should never be reached)
-  if (out) {
-    delete out;
-    out = NULL;
-  }
-  
-  Serial.println("Audio Task Completed");
-  vTaskDelete(NULL);
-}
+// // Task handle for audio playback
+// TaskHandle_t audioTaskHandle;
+// 
+// // Audio playback task
+// void audioTask(void *parameter) {
+//   while (true) {
+//     audio.loop();
+// 
+//     if (!audio.isRunning()) {
+//       Serial.println("Restarting audio...");
+//       audio.connecttoFS(SD, "/DEVICE-START-VOICE.mp3");
+//     }
+// 
+//     vTaskDelay(10 / portTICK_PERIOD_MS);
+//   }
+// }
 
 // CHECKPOINT
 
@@ -261,6 +96,8 @@ const char* password = "gisaniel924";
 // Global variables for sharing data between tasks
 volatile float currentDistance = 0;
 SemaphoreHandle_t distanceMutex;
+volatile bool systemInitialized = false;  // Add initialization flag
+unsigned long startupTime = 0;  // Track when system started
 
 // LCD Setup - Assuming standard 16x2 I2C LCD at address 0x27
 // Adjust address if your LCD uses a different one
@@ -420,170 +257,188 @@ void controlOutputsTask(void *parameter) {
   while(true) {
     currentTime = millis();
     
+    // Check if system is initialized (wait 5 seconds after startup)
+    if (!systemInitialized) {
+      if (currentTime - startupTime >= 5000) {  // 5 second initialization period
+        systemInitialized = true;
+        Serial.println("System initialization complete - starting monitoring");
+        
+        // Clear LCD and show ready message
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("System Ready");
+        lcd.setCursor(0, 1);
+        lcd.print("Monitoring...");
+        delay(2000);  // Show ready message for 2 seconds
+      } else {
+        // During initialization, show countdown
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Initializing");
+        lcd.setCursor(0, 1);
+        lcd.print((5000 - (currentTime - startupTime)) / 1000);
+        lcd.print(" seconds...");
+        vTaskDelay(LED_UPDATE_INTERVAL / portTICK_PERIOD_MS);
+        continue;  // Skip the rest of the loop during initialization
+      }
+    }
+    
     // Get the current distance with mutex protection
     if (xSemaphoreTake(distanceMutex, portMAX_DELAY) == pdTRUE) {
       distance = currentDistance;
       xSemaphoreGive(distanceMutex);
     }
     
-    // Determine current range based on distance
-    // Only consider valid levels (no "normal" state)
-    if (distance <= 15) {
-      currentRange = 3;  // Close range - Warning
-      statusMessage = "Warning";
-    } else if (distance <= 25) {
-      currentRange = 2;  // Medium range - Critical
-      statusMessage = "Critical";
-    } else if (distance <= 40) {
-      currentRange = 1;  // Far range - Alert
-      statusMessage = "Alert";
-    } else {
-      currentRange = 0;  // Out of range - ignore
-      statusMessage = "Normal";
-    }
-    
-    // Check if LCD text lock should be released
-    if (lcdTextLocked && (currentTime - lcdLockStartTime) >= LCD_LOCK_TIME_MS) {
-      lcdTextLocked = false;
-      Serial.println("LCD text lock released");
-      
-      // When LCD lock is released, return to showing weather information
-      // but keep LEDs on until timeout
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print(cityName);
-      lcd.setCursor(0, 1);
-      lcd.print(weatherDescription);
-      lcd.print(" ");
-      lcd.print((int)temperature);
-      lcd.print("C");
-      
-      lastLCDUpdateTime = currentTime; // Reset LCD update timer
-    }
-    
-    // Update LCD with current information if not locked and update interval passed
-    if (!lcdTextLocked && currentTime - lastLCDUpdateTime >= LCD_UPDATE_INTERVAL) {
-      // Clear LCD for clean display
-      lcd.clear();
-      
-      // Show monitoring status on LCD when not locked
-      lcd.setCursor(0, 0);
-      lcd.print(cityName);
-      lcd.setCursor(0, 1);
-      lcd.print(weatherDescription);
-      lcd.print(" ");
-      lcd.print((int)temperature);
-      lcd.print("C");
-      currentDisplayedStatus = "Normal";
-      
-      lastLCDUpdateTime = currentTime;
-    }
-    
-    // Check if a valid range is detected and if debounce period has passed
-    if (currentRange != lastDetectedRange && currentRange > 0 && 
-        (currentTime - lastStateUpdateTime) >= DEBOUNCE_TIME_MS) {
-      // New valid range detected and debounce time passed
-      lastDetectedRange = currentRange;
-      lastStateUpdateTime = currentTime; // Update debounce timer
-      stateLastChangeTime = currentTime; // Reset 10-minute timer
-      activeState = currentRange;
-      
-      // Update LEDs based on new range
-      digitalWrite(LED_ONE, currentRange == 1 ? HIGH : LOW);
-      digitalWrite(LED_TWO, currentRange == 2 ? HIGH : LOW);
-      digitalWrite(LED_THREE, currentRange == 3 ? HIGH : LOW);
-      
-      // Queue audio event based on the current range
-      if (audioQueue != NULL) {
-        // Send the current range as the audio event
-        if (xQueueSend(audioQueue, &currentRange, 0) != pdTRUE) {
-          Serial.println("Failed to queue audio event - queue might be full");
-        } else {
-          Serial.print("Queued audio for flood level ");
-          Serial.println(currentRange);
-        }
-      }
-      
-      // Lock the LCD text for 5 seconds
-      lcdTextLocked = true;
-      lcdLockStartTime = currentTime;
-      
-      // Force update the LCD immediately with the water level info
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Water Dis: ");
-      lcd.print((int)distance);
-      lcd.print("cm");
-      
-      lcd.setCursor(0, 1);
-      lcd.print("Status: ");
-      lcd.print(statusMessage);
-      currentDisplayedStatus = statusMessage;
-      
-      Serial.print("New range detected: ");
-      Serial.println(currentRange);
-      Serial.print("Status: ");
-      Serial.println(statusMessage);
-      Serial.println("Timer reset to 10 minutes");
-      Serial.println("LCD text locked for 5 seconds");
-      
-      // Create appropriate SMS message based on flood level
-      switch(currentRange) {
-        case 1: // Alert
-          createAlertSMS(distance);
-          Serial.println("Created Alert SMS for Level 1");
-          break;
-        case 2: // Critical
-          createCriticalSMS(distance);
-          Serial.println("Created Critical SMS for Level 2");
-          break;
-        case 3: // Warning
-          createWarningSMS(distance);
-          Serial.println("Created Warning SMS for Level 3");
-          break;
-      }
-      
-      // Queue SMS to be sent - use a specific signal value for each level
-      int signalValue = 10 + currentRange; // 11=Alert, 12=Critical, 13=Warning
-      if (xQueueSend(smsQueue, &signalValue, 0) == pdTRUE) {
-        Serial.printf("Queued SMS for flood level %d\n", currentRange);
+    // Only process alerts if system is initialized
+    if (systemInitialized) {
+      // Determine current range based on distance
+      // Only consider valid levels (no "normal" state)
+      if (distance <= 15) {
+        currentRange = 3;  // Close range - Warning
+        statusMessage = "Warning";
+      } else if (distance <= 25) {
+        currentRange = 2;  // Medium range - Critical
+        statusMessage = "Critical";
+      } else if (distance <= 40) {
+        currentRange = 1;  // Far range - Alert
+        statusMessage = "Alert";
       } else {
-        Serial.println("Failed to queue SMS - queue might be full");
+        currentRange = 0;  // Out of range - ignore
+        statusMessage = "Normal";
       }
       
-    } else if (currentRange != lastDetectedRange && currentRange > 0) {
-      // Range changed but within debounce period - ignore the change
-      Serial.print("Ignoring change to range ");
-      Serial.print(currentRange);
-      Serial.println(" - debounce period active");
-    }
-    
-    // Check if timer has expired and outputs should be turned off
-    if (timeoutEnabled && activeState > 0 && (currentTime - stateLastChangeTime) >= LED_TIMEOUT_MS) {
-      // Turn off all LEDs
-      digitalWrite(LED_ONE, LOW);
-      digitalWrite(LED_TWO, LOW);
-      digitalWrite(LED_THREE, LOW);
-      
-      // Update LCD with normal monitoring status if not already showing
-      if (currentDisplayedStatus != "Normal") {
+      // Check if LCD text lock should be released
+      if (lcdTextLocked && (currentTime - lcdLockStartTime) >= LCD_LOCK_TIME_MS) {
+        lcdTextLocked = false;
+        Serial.println("LCD text lock released");
+        
+        // When LCD lock is released, return to showing weather information
+        // but keep LEDs on until timeout
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("Loc: ");
         lcd.print(cityName);
         lcd.setCursor(0, 1);
         lcd.print(weatherDescription);
         lcd.print(" ");
-        lcd.print(temperature);
+        lcd.print((int)temperature);
+        lcd.print("C");
         
-        currentDisplayedStatus = "Normal";
+        lastLCDUpdateTime = currentTime; // Reset LCD update timer
       }
       
-      // Update state
-      activeState = 0;
-      lcdTextLocked = false; // Make sure lock is released
+      // Update LCD with current information if not locked and update interval passed
+      if (!lcdTextLocked && currentTime - lastLCDUpdateTime >= LCD_UPDATE_INTERVAL) {
+        // Clear LCD for clean display
+        lcd.clear();
+        
+        // Show monitoring status on LCD when not locked
+        lcd.setCursor(0, 0);
+        lcd.print(cityName);
+        lcd.setCursor(0, 1);
+        lcd.print(weatherDescription);
+        lcd.print(" ");
+        lcd.print((int)temperature);
+        lcd.print("C");
+        currentDisplayedStatus = "Normal";
+        
+        lastLCDUpdateTime = currentTime;
+      }
       
-      Serial.println("Timeout reached (10 minutes) - All outputs turned off");
+      // Check if a valid range is detected and if debounce period has passed
+      if (currentRange != lastDetectedRange && currentRange > 0 && 
+          (currentTime - lastStateUpdateTime) >= DEBOUNCE_TIME_MS) {
+        // New valid range detected and debounce time passed
+        lastDetectedRange = currentRange;
+        lastStateUpdateTime = currentTime; // Update debounce timer
+        stateLastChangeTime = currentTime; // Reset 10-minute timer
+        activeState = currentRange;
+        
+        // Update LEDs based on new range
+        digitalWrite(LED_ONE, currentRange == 1 ? HIGH : LOW);
+        digitalWrite(LED_TWO, currentRange == 2 ? HIGH : LOW);
+        digitalWrite(LED_THREE, currentRange == 3 ? HIGH : LOW);
+        
+        // Lock the LCD text for 5 seconds
+        lcdTextLocked = true;
+        lcdLockStartTime = currentTime;
+        
+        // Force update the LCD immediately with the water level info
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Water Dis: ");
+        lcd.print((int)distance);
+        lcd.print("cm");
+        
+        lcd.setCursor(0, 1);
+        lcd.print("Status: ");
+        lcd.print(statusMessage);
+        currentDisplayedStatus = statusMessage;
+        
+        Serial.print("New range detected: ");
+        Serial.println(currentRange);
+        Serial.print("Status: ");
+        Serial.println(statusMessage);
+        Serial.println("Timer reset to 10 minutes");
+        Serial.println("LCD text locked for 5 seconds");
+        
+        // Create appropriate SMS message based on flood level
+        switch(currentRange) {
+          case 1: // Alert
+            createAlertSMS(distance);
+            Serial.println("Created Alert SMS for Level 1");
+            break;
+          case 2: // Critical
+            createCriticalSMS(distance);
+            Serial.println("Created Critical SMS for Level 2");
+            break;
+          case 3: // Warning
+            createWarningSMS(distance);
+            Serial.println("Created Warning SMS for Level 3");
+            break;
+        }
+        
+        // Queue SMS to be sent - use a specific signal value for each level
+        int signalValue = 10 + currentRange; // 11=Alert, 12=Critical, 13=Warning
+        if (xQueueSend(smsQueue, &signalValue, 0) == pdTRUE) {
+          Serial.printf("Queued SMS for flood level %d\n", currentRange);
+        } else {
+          Serial.println("Failed to queue SMS - queue might be full");
+        }
+        
+      } else if (currentRange != lastDetectedRange && currentRange > 0) {
+        // Range changed but within debounce period - ignore the change
+        Serial.print("Ignoring change to range ");
+        Serial.print(currentRange);
+        Serial.println(" - debounce period active");
+      }
+      
+      // Check if timer has expired and outputs should be turned off
+      if (timeoutEnabled && activeState > 0 && (currentTime - stateLastChangeTime) >= LED_TIMEOUT_MS) {
+        // Turn off all LEDs
+        digitalWrite(LED_ONE, LOW);
+        digitalWrite(LED_TWO, LOW);
+        digitalWrite(LED_THREE, LOW);
+        
+        // Update LCD with normal monitoring status if not already showing
+        if (currentDisplayedStatus != "Normal") {
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Loc: ");
+          lcd.print(cityName);
+          lcd.setCursor(0, 1);
+          lcd.print(weatherDescription);
+          lcd.print(" ");
+          lcd.print(temperature);
+          
+          currentDisplayedStatus = "Normal";
+        }
+        
+        // Update state
+        activeState = 0;
+        lcdTextLocked = false; // Make sure lock is released
+        
+        Serial.println("Timeout reached (10 minutes) - All outputs turned off");
+      }
     }
     
     // Wait before next update
@@ -1160,24 +1015,34 @@ void buttonTask(void *pvParameters) {
   esp_task_wdt_delete(NULL); // Remove current task from WDT watch
   
   int lastButtonState = HIGH;
-  int lastAiButtonState = HIGH;
   unsigned long lastDebounceTime = 0;
-  unsigned long lastAiDebounceTime = 0;
   
   while (1) {
     int reading = digitalRead(BTTN_SMS);
-    int aiReading = digitalRead(BTTN_AI);
+    int ai = digitalRead(BTTN_AI);
     
-    // Handle SMS button
+    // If button state changed
     if (reading != lastButtonState) {
       lastDebounceTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
     }
 
+    
     // If enough time has passed since last state change
     if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastDebounceTime) > DEBOUNCE_DELAY) {
       // If button is pressed (LOW)
+      if (ai == LOW) {
+        Serial.println("Button pressed! AI SMS...");
+        Serial.println(aiWeatherMessage);
+
+        // listDir(SD, "/", 0);
+
+        while (digitalRead(BTTN_AI) == LOW) {
+          vTaskDelay(pdMS_TO_TICKS(10));
+        }
+      }
+
       if (reading == LOW) {
-        Serial.println("SMS button pressed! Queueing SMS...");
+        Serial.println("Button pressed! Queueing SMS...");
         // Send a message to the queue
         int signalValue = 1;
         xQueueSend(smsQueue, &signalValue, 0);
@@ -1189,37 +1054,7 @@ void buttonTask(void *pvParameters) {
       }
     }
     
-    // Handle AI button
-    if (aiReading != lastAiButtonState) {
-      lastAiDebounceTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    }
-    
-    // If enough time has passed since last AI button state change
-    if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastAiDebounceTime) > DEBOUNCE_DELAY) {
-      // If AI button is pressed (LOW)
-      if (aiReading == LOW) {
-        Serial.println("AI button pressed! Playing audio for current flood level...");
-        
-        // Play audio for the current flood level (or startup sound if no level is active)
-        if (activeState >= 1 && activeState <= 3) {
-          playAudioForFloodLevel(activeState);
-        } else {
-          // Play default/startup sound by sending a value outside the range 1-3
-          int defaultSound = 0;
-          if (audioQueue != NULL) {
-            xQueueSend(audioQueue, &defaultSound, 0);
-          }
-        }
-        
-        // Wait for button release to prevent multiple triggers
-        while (digitalRead(BTTN_AI) == LOW) {
-          vTaskDelay(pdMS_TO_TICKS(10));
-        }
-      }
-    }
-    
     lastButtonState = reading;
-    lastAiButtonState = aiReading;
     vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent task starvation
   }
 }
@@ -1319,52 +1154,62 @@ void wifiTask(void *pvParameters) {
   }
 }
 
-// Function to queue audio playback for a specific flood level
-void playAudioForFloodLevel(int level) {
-  if (audioQueue != NULL) {
-    // Ensure level is within valid range (1-3)
-    if (level >= 1 && level <= 3) {
-      // Check if the corresponding audio file exists
-      const char* audioFile;
-      
-      switch (level) {
-        case 1:
-          audioFile = AUDIO_ALERT;
-          break;
-        case 2:
-          audioFile = AUDIO_CRITICAL;
-          break;
-        case 3:
-          audioFile = AUDIO_WARNING;
-          break;
-        default:
-          audioFile = AUDIO_STARTUP;
-          break;
-      }
-      
-      if (!SD.exists(audioFile)) {
-        Serial.print("Cannot play audio - file not found: ");
-        Serial.println(audioFile);
-        return;
-      }
-      
-      if (xQueueSend(audioQueue, &level, 0) != pdTRUE) {
-        Serial.println("Failed to queue audio event - queue might be full");
-      } else {
-        Serial.print("Manually queued audio for flood level ");
-        Serial.println(level);
-      }
-    }
+// Audio playback task
+void audioPlaybackTask(void *parameter) {
+  Serial.println("Starting audio playback task");
+  
+  // Open MP3 file from SD card
+  mp3File = SD.open("/DEVICE-START-VOICE.mp3");
+  if (!mp3File) {
+    Serial.println("Failed to open MP3 file!");
+    vTaskDelete(NULL);
+    return;
   }
+  
+  // Configure I2S
+  auto i2sConfig = i2sStream.defaultConfig(TX_MODE);
+  i2sConfig.pin_bck = I2S_BCLK;
+  i2sConfig.pin_ws = I2S_LRC;
+  i2sConfig.pin_data = I2S_DOUT;
+  i2sConfig.buffer_size = 8192;  // Increase buffer size
+  i2sConfig.buffer_count = 8;    // Increase buffer count
+  i2sStream.begin(i2sConfig);
+  
+  // Initialize decoder
+  decoder.begin();
+  
+  // Set up copier
+  copier.begin(decoder, mp3File);
+  
+  Serial.println("Audio playback started");
+  
+  // Play the audio file
+  while (copier.copy()) {
+    // Allow other tasks to run
+    vTaskDelay(1);
+  }
+  
+  // Clean up
+  decoder.end();
+  i2sStream.end();
+  mp3File.close();
+  
+  Serial.println("Audio playback completed");
+  
+  // Delete this task when done
+  vTaskDelete(NULL);
 }
 
 void setup() {
-  // Set microSD Card CS pin  
-  pinMode(SD_CS, OUTPUT);
+  // Set microSD Card CS pin  pinMode(SD_CS, OUTPUT);
   digitalWrite(SD_CS, HIGH);
 
   // Initialize serial communication
   Serial.begin(115200);
+  
+  // Record startup time
+  startupTime = millis();
+  systemInitialized = false;  // Ensure system starts uninitialized
 
   // Initialize LCD
   Wire.begin();
@@ -1422,81 +1267,29 @@ void setup() {
   
   // Create queue for button events
   smsQueue = xQueueCreate(5, sizeof(int));
-  
-  // Create queue for audio events
-  audioQueue = xQueueCreate(5, sizeof(int));
 
-  // Configure I2S pins before SD initialization
-  pinMode(I2S_BCLK, OUTPUT);
-  pinMode(I2S_LRC, OUTPUT);
-  pinMode(I2S_DOUT, OUTPUT);
-
-  // Initialize SPI for SD card with optimized settings
+  // Initialize SPI for SD card
   spiSD.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  spiSD.setFrequency(16000000); // Increase SPI clock speed for better performance
-  
-  // Initialize SD card with multiple attempts
-  int sdInitAttempts = 0;
-  while (!SD.begin(SD_CS_PIN, spiSD) && sdInitAttempts < 3) {
-    Serial.print("SD Card mount failed. Attempt ");
-    Serial.print(sdInitAttempts + 1);
-    Serial.println(" of 3");
-    delay(500);
-    sdInitAttempts++;
+  if (!SD.begin(SD_CS, spiSD)) {
+    Serial.println("❌ SD init failed");
+    while (1) delay(100);
   }
-  
-  if (sdInitAttempts == 3) {
-    Serial.println("Failed to mount SD Card after 3 attempts");
-  } else {
-    Serial.println("SD card initialized.");
-    
-    // Check if all MP3 files exist
-    bool allFilesExist = true;
-    
-    if (!SD.exists(AUDIO_STARTUP)) {
-      Serial.println("Startup audio file not found!");
-      allFilesExist = false;
-    }
-    
-    if (!SD.exists(AUDIO_ALERT)) {
-      Serial.println("Alert audio file not found!");
-      allFilesExist = false;
-    }
-    
-    if (!SD.exists(AUDIO_CRITICAL)) {
-      Serial.println("Critical audio file not found!");
-      allFilesExist = false;
-    }
-    
-    if (!SD.exists(AUDIO_WARNING)) {
-      Serial.println("Warning audio file not found!");
-      allFilesExist = false;
-    }
-    
-    if (!allFilesExist) {
-      // List files in root directory for debugging
-      listDir(SD, "/", 0);
-    }
-    
-    // Start audio task
-    Serial.println("Starting audio task");
-    xTaskCreate(
-      audioTask,           // Task function
-      "AudioTask",         // Name
-      8192,                // Stack size (increased for better stability)
-      NULL,                // Parameter
-      1,                   // Priority
-      &audioTaskHandle     // Task handle
-    );
-    
-    // Queue startup sound to be played
-    int startupSound = 0; // 0 indicates startup sound
-    if (audioQueue != NULL) {
-      if (xQueueSend(audioQueue, &startupSound, 0) == pdTRUE) {
-        Serial.println("Queued startup sound");
-      }
-    }
-  }
+  Serial.println("✅ SD initialized");
+
+  Serial.println("SD card initialized.");
+
+  // List files on SD card
+  listDir(SD, "/", 0);
+
+  // Create audio playback task to play startup sound
+  xTaskCreate(
+    audioPlaybackTask,    // Task function
+    "AudioTask",          // Task name
+    4096,                 // Stack size
+    NULL,                 // Task parameters
+    1,                    // Task priority
+    NULL                  // Task handle
+  );
 
   // Create FreeRTOS tasks
   xTaskCreate(
@@ -1553,8 +1346,6 @@ void setup() {
     2,             // Task priority
     &wifiTaskHandle
   );
-
-  listDir(SD, "/", 0);
 
   Serial.println("ESP32 HC-SR04 Distance Sensor with FreeRTOS Started");
 }

@@ -10,6 +10,8 @@
 #include <vector>
 #include <LiquidCrystal_I2C.h>
 
+// CHECKPOINT
+
 // Wifi
 #define SSID "TK-gacura"
 #define PASSWORD "gisaniel924"
@@ -118,6 +120,168 @@ std::vector<String> registeredPhoneNumbers;
 // Current water distance reading
 float currentDistance = 0.0;
 
+// Add new variables for connectivity checking
+unsigned long lastConnectivityCheck = 0;
+const unsigned long connectivityCheckInterval = 60000;  // Check connectivity every minute
+
+// Add this helper function to troubleshoot HTTP connection issues
+bool troubleshootHTTPConnection(int errorCode, const char* endpoint) {
+  if (errorCode == -1) { // Connection refused
+    Serial.println("⚠️ Connection refused - troubleshooting network...");
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Network Error");
+    lcd.setCursor(0, 1);
+    lcd.print("Troubleshooting...");
+    
+    // First check basic WiFi connection
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("📡 WiFi disconnected - reconnecting...");
+      
+      // Full WiFi reset sequence
+      WiFi.disconnect(true);  // Disconnect with clearing settings
+      delay(1000);
+      WiFi.mode(WIFI_STA); // Set station mode
+      delay(1000);
+      WiFi.begin(SSID, PASSWORD);
+      
+      // Wait up to 10 seconds for reconnection
+      int timeout = 10;
+      while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+        delay(1000);
+        Serial.print(".");
+        timeout--;
+      }
+      
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\n❌ WiFi reconnection failed");
+        return false;
+      }
+      
+      Serial.println("\n✅ WiFi reconnected");
+    }
+    
+    // Test basic HTTP connectivity first (no SSL)
+    Serial.println("🔍 Testing basic HTTP connectivity...");
+    HTTPClient httpTest;
+    httpTest.setTimeout(3000); // Short timeout for test
+    httpTest.begin("http://www.google.com"); // Using HTTP not HTTPS
+    int httpCode = httpTest.GET();
+    httpTest.end();
+    
+    if (httpCode < 0) {
+      Serial.print("❌ Basic HTTP test failed, code: ");
+      Serial.println(httpCode);
+    } else {
+      Serial.println("✅ Basic HTTP connectivity test passed");
+    }
+    
+    // Test HTTPS with WiFiClientSecure
+    Serial.println("🔍 Testing HTTPS connectivity...");
+    WiFiClientSecure secureClient;
+    // Skip certificate validation for troubleshooting
+    secureClient.setInsecure();
+    
+    // Try to connect to a known HTTPS endpoint
+    if (secureClient.connect("www.google.com", 443)) {
+      Serial.println("✅ HTTPS connection successful");
+      secureClient.stop();
+      
+      // Now try to connect to the specific endpoint
+      Serial.print("🔍 Testing HTTPS connection to: ");
+      Serial.println(endpoint);
+      
+      // Extract host from endpoint (remove https:// if present)
+      String host = endpoint;
+      if (host.startsWith("https://")) {
+        host = host.substring(8);
+      }
+      // Extract just the domain part if there's a path
+      int pathPos = host.indexOf('/');
+      if (pathPos > 0) {
+        host = host.substring(0, pathPos);
+      }
+      
+      if (secureClient.connect(host.c_str(), 443)) {
+        Serial.print("✅ Successfully connected to ");
+        Serial.println(host);
+        secureClient.stop();
+        
+        // Update DNS settings since secure connection works
+        Serial.println("🔄 Setting Google DNS servers to improve reliability...");
+        IPAddress primaryDNS(8, 8, 8, 8);
+        IPAddress secondaryDNS(8, 8, 4, 4);
+        WiFi.disconnect();
+        delay(1000);
+        if (!WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), primaryDNS, secondaryDNS)) {
+          Serial.println("❌ DNS configuration failed but connectivity works");
+        }
+        WiFi.begin(SSID, PASSWORD);
+        int timeout = 10;
+        while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+          delay(1000);
+          Serial.print(".");
+          timeout--;
+        }
+        
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Connection fixed");
+        delay(1000);
+        
+        return true;
+      } else {
+        Serial.print("❌ Failed to connect to ");
+        Serial.println(host);
+      }
+    } else {
+      Serial.println("❌ HTTPS connection failed");
+    }
+    
+    // If we're here, basic SSL tests failed, try changing DNS servers
+    Serial.println("🔄 Setting Google DNS servers (8.8.8.8, 8.8.4.4)...");
+    IPAddress primaryDNS(8, 8, 8, 8);
+    IPAddress secondaryDNS(8, 8, 4, 4);
+    
+    WiFi.disconnect();
+    delay(1000);
+    
+    // Attempt to reconnect with custom DNS
+    if (!WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), primaryDNS, secondaryDNS)) {
+      Serial.println("❌ DNS configuration failed");
+    }
+    
+    WiFi.begin(SSID, PASSWORD);
+    
+    // Wait for connection
+    int timeout = 10; // Declare a new timeout variable in this scope
+    while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+      delay(1000);
+      Serial.print(".");
+      timeout--;
+    }
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("\n❌ WiFi reconnection with custom DNS failed");
+      return false;
+    }
+    
+    Serial.println("\n✅ WiFi reconnected with custom DNS");
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Network reset");
+    lcd.setCursor(0, 1);
+    lcd.print("Testing again...");
+    
+    return true; // Successfully troubleshot connection issues
+  }
+  
+  // For other error codes, we don't need to troubleshoot
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -131,41 +295,70 @@ void setup() {
   delay(1000);
 
   WiFi.begin(SSID, PASSWORD);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting WiFi");
+  
   Serial.print("Connecting to WiFi...");
-  while (WiFi.status() != WL_CONNECTED) {
+  int connectTimeout = 0;
+  while (WiFi.status() != WL_CONNECTED && connectTimeout < 20) {
     delay(1000);
     Serial.print(".");
+    lcd.setCursor(connectTimeout % 16, 1);
+    lcd.print(".");
+    connectTimeout++;
   }
-  Serial.println("\nConnected to WiFi\n");
-  getNumbers();
-
+  
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected to WiFi");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+    Serial.println("\nConnected to WiFi\n");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected!");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(1000);
+    
+    // Verify internet connectivity
+    if (!checkInternetConnection()) {
+      Serial.println("WiFi connected but internet test failed");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("No Internet!");
+      lcd.setCursor(0, 1);
+      lcd.print("Check connection");
+      delay(2000);
+    }
+    
+    getNumbers();
 
+    // Use fallback coordinates initially
     latitude = fallback_latitude;
     longitude = fallback_longitude;
 
+    // Get weather data with fallback coordinates
     if (getWeather()) {
       getAISuggestion();
     }
 
-    // Get location from ipinfo.io
-    // if (getLocationFromIpInfo()) {
-    //   Serial.println("Successfully obtained location from ipinfo.io");
-    //   if (getWeather()) {
-    //     getAISuggestion();
-    //   }
-    //   latitude = fallback_latitude;
-    //   longitude = fallback_longitude;
-    // } else {
-    //   latitude = fallback_latitude;
-    //   longitude = fallback_longitude;
-    //   Serial.println("Using fallback coordinates");
-    // }
+    // Try to get more accurate location from IP
+    if (getLocationFromIpInfo()) {
+      Serial.println("Successfully obtained location from ipinfo.io");
+      if (getWeather()) {
+        getAISuggestion();
+      }
+    } else {
+      Serial.println("Using fallback coordinates");
+      latitude = fallback_latitude;
+      longitude = fallback_longitude;
+    }
   } else {
     Serial.println("\nFailed to connect to WiFi");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed");
+    lcd.setCursor(0, 1);
+    lcd.print("Check settings");
+    delay(2000);
   }
 
   // Set microSD Card CS as OUTPUT and set HIGH
@@ -215,6 +408,36 @@ void setup() {
 void loop() {
   unsigned long currentTime = millis();
 
+  // Simplified periodic connectivity check 
+  if (currentTime - lastConnectivityCheck >= connectivityCheckInterval) {
+    lastConnectivityCheck = currentTime;
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi disconnected, attempting to reconnect...");
+      
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("WiFi Disconnected");
+      
+      // Simple reconnect without nesting
+      WiFi.disconnect();
+      delay(1000);
+      WiFi.begin(SSID, PASSWORD);
+      
+      // Wait up to 5 seconds for connection
+      int timeout = 5;
+      while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+        delay(1000);
+        Serial.print(".");
+        timeout--;
+      }
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi reconnected successfully");
+      }
+    }
+  }
+
   // Get distance from sensor - This happens immediately with every loop
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
@@ -228,15 +451,9 @@ void loop() {
   // Update the current distance global variable for use in SMS messages
   currentDistance = distance;
 
-  // Serial.print("Raw duration: ");
-  // Serial.print(duration);
-  // Serial.print(" μs");
-  // Serial.print(" Distance: ");
-  // Serial.print(distance);
-  // Serial.println(" cm");
-
   // Determine target LED state based on current distance
   int targetLedState;
+
   if (distance <= 10) {
     targetLedState = 3;  // LED_THREE
   } else if (distance <= 20) {
@@ -315,15 +532,6 @@ void loop() {
   if (digitalRead(BTTN_AI) == LOW) {
     Serial.println("AI button pressed!");
 
-    // First, get a fresh AI suggestion before playing any sounds
-    Serial.println("Getting fresh AI weather suggestion...");
-    bool suggestionUpdated = getAISuggestion();
-    if (suggestionUpdated) {
-      Serial.println("Successfully updated AI suggestion!");
-    } else {
-      Serial.println("Couldn't update AI suggestion, using existing one");
-    }
-
     // Start playing notification sound immediately
     audio.connecttoFS(SD, "AI-NOTIF.mp3");
 
@@ -368,141 +576,48 @@ void loop() {
 
     Serial.print("isRunning: ");
     Serial.println(isRunning);
-    
-    // Format a message to display on serial console for visibility
-    String aiStatusMessage = String("🤖 AI WEATHER & FLOOD UPDATE 🤖\n\n") +
-                          "📍 Location: " + location + "\n" +
-                          "🌤️ Current Weather: " + weatherDescription + "\n" +
-                          "🌡️ Temperature: " + String(temperature, 1) + "°C (feels like " + String(feelsLike, 1) + "°C)\n" +
-                          "💧 Humidity: " + String(humidity, 0) + "%\n\n" +
-                          "🚨 Flood Status: ";
-                          
-    // Add flood status information
-    if (currentLedState == 1) {
-      aiStatusMessage += "LOW RISK - Initial flooding detected\n\n";
-    } else if (currentLedState == 2) {
-      aiStatusMessage += "MEDIUM RISK - Significant flooding detected\n\n";
-    } else if (currentLedState == 3) {
-      aiStatusMessage += "HIGH RISK - Severe flooding detected\n\n";
-    } else {
-      aiStatusMessage += "No flooding detected at this time\n\n";
-    }
-    
-    // Add AI suggestion
-    aiStatusMessage += "🤖 AI Recommendation:\n" + AISuggestion;
-    
-    // Print the formatted message to serial
-    Serial.println("\n===============================");
-    Serial.println(aiStatusMessage);
-    Serial.println("===============================\n");
+    Serial.print("AISuggestion: ");
+    Serial.println(AISuggestion);
 
     // LEDs REMAIN ON here...
-    playFloodWarning();  // Play audio version of AI suggestion
-    
+
+    playFloodWarning();  // Optional sound or alert before AI suggestion
+
     // NOW turn off all LEDs after AI suggestion is done
     digitalWrite(AI_LED_ONE, LOW);
     digitalWrite(AI_LED_TWO, LOW);
     digitalWrite(AI_LED_THREE, LOW);
+
+    getAISuggestion();  // This might take time — LEDs stay on through it
 
     lastPlayTime = millis();
     delay(1000);  // debounce delay
   }
 
   if (digitalRead(BTTN_SMS) == LOW) {
-    Serial.println("SMS button pressed!");
-
-    // Start playing notification sound immediately
-    audio.connecttoFS(SD, "SMS-SENT.mp3");
-
-    // Define sequence
-    int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
-    int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 = all LEDs on
-    int currentStep = 0;
-    unsigned long previousStepTime = millis();
-    const long stepInterval = 200;
-
-    // Run LED sequence while audio is playing
-    while (audio.isRunning() || currentStep < 7) {
-      if (audio.isRunning()) {
-        audio.loop();
-      }
-
-      unsigned long currentTime = millis();
-      if (currentTime - previousStepTime >= stepInterval) {
-        previousStepTime = currentTime;
-
-        // Turn off all LEDs before applying the next step
-        if (currentStep < 7) {
-          for (int j = 0; j < 3; j++) {
-            digitalWrite(leds[j], LOW);
-          }
-        }
-
-        if (currentStep < 7) {
-          if (sequence[currentStep] == -1) {
-            // Turn all LEDs ON
-            delay(200);
-            for (int j = 0; j < 3; j++) {
-              digitalWrite(leds[j], HIGH);
-            }
-          } else {
-            digitalWrite(leds[sequence[currentStep]], HIGH);
-          }
-          currentStep++;
-        }
-      }
-    }
-
-    // Create alert message based on current alert state
-    String alertMessage = "";
-    float distance = currentDistance; // Get current water level reading
-
-    if (currentLedState == 1) {
-      alertMessage = String("⚠️ FLOOD ALERT - LEVEL 1 ⚠️\n\n") +
-                    "📍 Location: " + location + "\n" +
-                    "🔍 Current water level: " + String(distance, 1) + " cm\n" +
-                    "⚠️ Status: ALERT - Initial flooding detected\n\n" +
-                    "🚨 PRECAUTIONS:\n" +
-                    "- Monitor water levels\n" +
-                    "- Prepare emergency supplies\n" +
-                    "- Stay tuned for updates\n\n" +
-                    "From: PRAF Technology Flood Monitoring System";
-    } else if (currentLedState == 2) {
-      alertMessage = String("🔴 FLOOD CRITICAL - LEVEL 2 🔴\n\n") +
-                    "📍 Location: " + location + "\n" +
-                    "🔍 Current water level: " + String(distance, 1) + " cm\n" +
-                    "⚠️ Status: CRITICAL - Significant flooding\n\n" +
-                    "🚨 URGENT ACTIONS REQUIRED:\n" +
-                    "- Move valuables to higher ground\n" +
-                    "- Prepare for possible evacuation\n" +
-                    "- Avoid flooded areas\n" +
-                    "- Charge communication devices\n\n" +
-                    "From: PRAF Technology Flood Monitoring System";
-    } else if (currentLedState == 3) {
-      alertMessage = String("🚨 FLOOD WARNING - LEVEL 3 🚨\n\n") +
-                    "📍 Location: " + location + "\n" +
-                    "🔍 Current water level: " + String(distance, 1) + " cm\n" +
-                    "⚠️ Status: WARNING - Severe flooding\n\n" +
-                    "🚨 EMERGENCY ACTIONS REQUIRED:\n" +
-                    "- EVACUATE immediately if instructed\n" +
-                    "- Move to higher ground NOW\n" +
-                    "- Follow emergency routes\n" +
-                    "- Do NOT attempt to cross floodwaters\n" +
-                    "- Call emergency services if trapped\n\n" +
-                    "From: PRAF Technology Flood Monitoring System";
-    } else {
-      // Default message when no flood level is active
-      alertMessage = String("🚨 FLOOD ALERT! 🚨\n\n") +
-                    "📱 System Check:\n\n" +
-                    "📍 Location: " + location + "\n" +
-                    "🌤️ Weather: " + weatherDescription + "\n" +
-                    "🌡️ Temperature: " + String(temperature, 1) + "°C\n" +
-                    "🌡️ Feels like: " + String(feelsLike, 1) + "°C\n" +
-                    "💧 Humidity: " + String(humidity, 0) + "%\n\n" +
-                    "🤖 AI Weather Update:\n" +
-                    AISuggestion + "\n\n" +
-                    "From: PRAF Technology";
-    }
+    Serial.println("📱 SMS button pressed!");
+    
+    // Visual feedback - turn on LEDs
+    digitalWrite(LED_ONE, HIGH);
+    digitalWrite(LED_TWO, HIGH);
+    digitalWrite(LED_THREE, HIGH);
+    
+    // Display on LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Sending SMS...");
+    
+    // Create default alert message with emojis and formatting
+    String alertMessage = String("🚨 FLOOD ALERT! 🚨\n\n") +
+                     "📱 System Check:\n\n" +
+                     "📍 Location: " + location + "\n" +
+                     "🌤️ Weather: " + weatherDescription + "\n" +
+                     "🌡️ Temperature: " + String(temperature, 1) + "°C\n" +
+                     "🌡️ Feels like: " + String(feelsLike, 1) + "°C\n" +
+                     "💧 Humidity: " + String(humidity, 0) + "%\n\n" +
+                     "🤖 AI Weather Update:\n" +
+                     AISuggestion + "\n\n" +
+                     "From: PRAF Technology";
 
     // Ensure WiFi is connected before sending SMS
     if (WiFi.status() != WL_CONNECTED) {
@@ -513,6 +628,8 @@ void loop() {
     // Send SMS to all registered numbers
     if (registeredPhoneNumbers.size() > 0) {
       Serial.println("📲 Sending SMS to " + String(registeredPhoneNumbers.size()) + " registered numbers");
+      lcd.setCursor(0, 1);
+      lcd.print("To: " + String(registeredPhoneNumbers.size()) + " numbers");
 
       for (String toNumber : registeredPhoneNumbers) {
         sendHttpSMS(fromSmsNumber, toNumber.c_str(), alertMessage.c_str());
@@ -521,21 +638,26 @@ void loop() {
       }
     } else {
       // Use the default number if no registered numbers
+      lcd.setCursor(0, 1);
+      lcd.print("To: Default number");
       sendHttpSMS(fromSmsNumber, toSmsNumber, alertMessage.c_str());
       Serial.println("✅ SMS sent to default number: " + String(toSmsNumber));
     }
 
-    // Play confirmation sound
-    audio.connecttoFS(SD, "SMS-SENT.mp3");
-    while (audio.isRunning()) {
-      audio.loop();
-    }
-
-    delay(1200);  // debounce delay
-
-    digitalWrite(AI_LED_ONE, LOW);
-    digitalWrite(AI_LED_TWO, LOW);
-    digitalWrite(AI_LED_THREE, LOW);
+    // Visual feedback - done
+    delay(1000); 
+    digitalWrite(LED_ONE, LOW);
+    digitalWrite(LED_TWO, LOW);
+    digitalWrite(LED_THREE, LOW);
+    
+    // Update LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("SMS Sent!");
+    lcd.setCursor(0, 1);
+    lcd.print("Press again to test");
+    
+    delay(2000);  // debounce delay
   }
 
   // Check if first file is done playing and we need to play the alert
@@ -569,23 +691,51 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
   Serial.print("📱 Sending SMS to: ");
   Serial.println(to);
   
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(10); // Set a lower timeout to prevent blocking too long
-  
-  Serial.println("🔄 Connecting to SMS API...");
-  int retry = 0;
-  while (!client.connect("api.httpsms.com", 443) && retry < 3) {
-    Serial.println("Connection to HttpSMS API failed, retrying...");
-    delay(100); // Short delay before retry
-    retry++;
-  }
-  
-  if (retry >= 3) {
-    Serial.println("Connection to HttpSMS API failed after multiple attempts");
+  // Check and ensure WiFi connection
+  if (!ensureWiFiConnection()) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("SMS Failed");
+    lcd.setCursor(0, 1);
+    lcd.print("No WiFi");
     return;
   }
   
+  // Update LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Sending SMS...");
+  lcd.setCursor(0, 1);
+  lcd.print("To: " + String(to));
+  
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(10); // 10 second timeout
+  
+  Serial.println("🔄 Connecting to SMS API...");
+  
+  // Connect with timeout control
+  bool connected = false;
+  unsigned long connectStartTime = millis();
+  while (!connected && (millis() - connectStartTime < 5000)) { // 5 second connection timeout
+    if (client.connect("api.httpsms.com", 443)) {
+      connected = true;
+      Serial.println("Connected to HttpSMS API");
+    } else {
+      delay(500);
+    }
+  }
+  
+  if (!connected) {
+    Serial.println("Connection to HttpSMS API timed out");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("SMS Failed");
+    lcd.setCursor(0, 1);
+    lcd.print("Connection Error");
+    return;
+  }
+
   // Create JSON payload
   DynamicJsonDocument doc(1024);
   doc["content"] = body;
@@ -607,23 +757,57 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
   client.println();
   client.println(jsonPayload);
   
-  Serial.println("SMS Request sent!");
+  Serial.println("SMS Request sent, waiting for response...");
   
-  // Read and print the response with proper timing
-  Serial.println("Reading SMS API response:");
-  unsigned long timeout = millis();
-  while ((client.connected() || client.available()) && millis() - timeout < 5000) {
+  // Read response with proper timeout
+  String response = "";
+  bool responseReceived = false;
+  unsigned long responseTimeout = millis() + 5000; // 5 seconds response timeout
+  
+  while (millis() < responseTimeout) {
     if (client.available()) {
-      String line = client.readStringUntil('\n');
-      Serial.println(line);
-    } else {
-      // Short delay while waiting for data
-      delay(10);
+      responseReceived = true;
+      char c = client.read();
+      response += c;
+    } else if (!client.connected() && responseReceived) {
+      // Response complete and connection closed
+      break;
     }
+    delay(10); // Short delay to prevent hogging CPU
   }
   
   client.stop();
-  Serial.println("SMS Connection closed");
+  
+  if (response.length() > 0) {
+    Serial.println("SMS API Response received:");
+    Serial.println(response);
+    
+    // Check if response contains success indicators
+    if (response.indexOf("HTTP/1.1 20") > 0) { // HTTP 200 or 201
+      Serial.println("✅ SMS sent successfully");
+      
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("SMS Sent!");
+      lcd.setCursor(0, 1);
+      lcd.print("To: " + String(to));
+      delay(1000);
+    } else {
+      Serial.println("❌ SMS sending failed based on response");
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("SMS Failed");
+      lcd.setCursor(0, 1);
+      lcd.print("Server Error");
+    }
+  } else {
+    Serial.println("No response from SMS API or timeout occurred");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("SMS Status");
+    lcd.setCursor(0, 1);
+    lcd.print("Unknown (timeout)");
+  }
 }
 
 // 🔊 Speak in smart chunks
@@ -742,13 +926,23 @@ void turnOffAllLEDs() {
 }
 
 bool getLocationFromIpInfo() {
-  if (WiFi.status() != WL_CONNECTED) {
+  // Check and ensure WiFi connection
+  if (!ensureWiFiConnection()) {
     return false;
   }
 
   HTTPClient http;
   bool success = false;
-
+  
+  // Set timeout but not too long
+  http.setTimeout(5000);
+  
+  // Update LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Getting Location");
+  
+  // Simple approach - one attempt with proper timeout
   http.begin("https://ipinfo.io/json");
   int httpCode = http.GET();
 
@@ -796,28 +990,67 @@ bool getLocationFromIpInfo() {
         Serial.println(longitude, 6);
 
         success = true;
+        
+        // Show location on LCD
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Location: " + city);
+        lcd.setCursor(0, 1);
+        lcd.print(region + ", " + country);
+        delay(1000);
       }
+    } else {
+      Serial.println("Error parsing location data from ipinfo.io");
     }
   } else {
     Serial.print("Failed to get location from IPInfo, HTTP code: ");
     Serial.println(httpCode);
+    
+    // If API failed due to connectivity, try to reconnect
+    if (httpCode < 0) {
+      WiFi.disconnect();
+      delay(1000);
+      WiFi.begin(SSID, PASSWORD);
+    }
   }
+  
   http.end();
+  
+  if (!success) {
+    Serial.println("Using fallback coordinates");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Location Error");
+    lcd.setCursor(0, 1);
+    lcd.print("Using defaults");
+    delay(1000);
+  }
 
   return success;
 }
 
 bool getWeather() {
-  if (WiFi.status() != WL_CONNECTED) {
+  // Check and ensure WiFi connection
+  if (!ensureWiFiConnection()) {
     return false;
   }
 
   HTTPClient http;
   bool success = false;
-
+  
+  // Set timeout but not too long
+  http.setTimeout(5000);
+  
   String url = String("http://api.openweathermap.org/data/2.5/weather?q=Caloocan,PH&appid=") + weatherApiKey + "&units=metric&lang=en";
 
+  // Update LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Getting Weather");
+  
   Serial.println("Weather API URL: " + url);
+  
+  // Simple approach - one attempt with proper timeout
   http.begin(url);
   int httpCode = http.GET();
 
@@ -870,36 +1103,69 @@ bool getWeather() {
       Serial.println("============================");
 
       success = true;
+      
+      // Show weather on LCD briefly
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(cityName + ": " + String(temperature, 1) + "C");
+      lcd.setCursor(0, 1);
+      lcd.print(weatherDescription);
+      delay(1000);
     } else {
       Serial.println("Error parsing weather data");
     }
   } else {
     Serial.println("Failed to connect to OpenWeather API, HTTP code: " + String(httpCode));
+    
+    // If API failed due to connectivity, try to reconnect
+    if (httpCode < 0) {
+      WiFi.disconnect();
+      delay(1000);
+      WiFi.begin(SSID, PASSWORD);
+    }
   }
+  
   http.end();
+  
+  // If we failed, use fallback data
+  if (!success) {
+    Serial.println("Using fallback weather data");
+    
+    // Provide fallback data
+    location = "Caloocan";
+    weatherDescription = "unknown weather";
+    temperature = 30.0;  // Reasonable default for Philippines
+    feelsLike = 32.0;
+    humidity = 70.0;
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Weather Error");
+    lcd.setCursor(0, 1);
+    lcd.print("Using defaults");
+    delay(1000);
+    
+    // We return true even with fallback data to allow the program to continue
+    return true;
+  }
 
   return success;
 }
 
-bool getAISuggestion() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ WiFi not connected. Cannot get AI suggestion.");
-    return false;
+void getAISuggestion() {
+  // Check and ensure WiFi connection
+  if (!ensureWiFiConnection()) {
+    // Use fallback message if we can't connect
+    AISuggestion = "PRAF Technology Weather Update: Walang internet connection. Mag-ingat pa rin sa posibleng pagbaha sa panahon ng ulan.";
+    return;
   }
 
-  HTTPClient http;
-  bool success = false;
-  
-  Serial.println("🤖 Requesting AI weather suggestion...");
-
-  // Make sure we have reasonable weather data
-  if (temperature == 0.0 || weatherDescription.length() == 0) {
-    if (getWeather()) {
-      Serial.println("✅ Weather data refreshed successfully");
-    } else {
-      Serial.println("⚠️ Could not refresh weather data, using default values");
-    }
-  }
+  // Update LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Getting AI Data");
+  lcd.setCursor(0, 1);
+  lcd.print("Please wait...");
 
   String prompt = "Provide a short and helpful suggestion to inform residents about the current weather and keep them safe.\n\n";
   prompt += "- Weather Details:\n";
@@ -908,20 +1174,6 @@ bool getAISuggestion() {
   prompt += "  - Temperature: " + String(temperature, 2) + "°C\n";
   prompt += "  - Feels like: " + String(feelsLike, 2) + "°C\n";
   prompt += "  - Humidity: " + String(humidity, 2) + "%\n\n";
-  
-  // Add flood status information to the prompt
-  prompt += "- Current Water Level Status:\n";
-  if (currentLedState == 1) {
-    prompt += "  - LOW FLOOD RISK detected\n";
-  } else if (currentLedState == 2) {
-    prompt += "  - MEDIUM FLOOD RISK detected\n";
-  } else if (currentLedState == 3) {
-    prompt += "  - HIGH FLOOD RISK detected - EMERGENCY SITUATION\n";
-  } else {
-    prompt += "  - No flooding detected at this time\n";
-  }
-  prompt += "\n";
-
   prompt += "Instructions:\n";
   prompt += "- Write the message like a weather forecast-casual, clear, and understandable for most people.\n";
   prompt += "- Start with: \"PRAF Technology Weather Update:\".\n";
@@ -955,149 +1207,323 @@ bool getAISuggestion() {
 
   String geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + String(geminiApiKey);
 
-  // Set a timeout value for the HTTP request
-  http.setTimeout(10000); // 10 second timeout
+  // Try up to 3 times with full error handling
+  bool success = false;
+  int maxAttempts = 3;
+  
+  for (int attempt = 0; attempt < maxAttempts && !success; attempt++) {
+    if (attempt > 0) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("AI Retry #" + String(attempt));
+      delay(1000);
+    }
+    
+    Serial.print("Attempt ");
+    Serial.print(attempt + 1);
+    Serial.println(" connecting to Gemini API...");
+    
+    // Create a secure client for HTTPS
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Skip certificate validation
+    
+    HTTPClient http;
+    http.setTimeout(15000); // Set longer timeout for Gemini API
+    
+    // Use WiFiClientSecure with begin
+    http.begin(secureClient, geminiUrl);
+    http.addHeader("Content-Type", "application/json");
+    int httpCode = http.POST(requestBody);
+    
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      Serial.println("Gemini API Response: " + payload);
 
-  http.begin(geminiUrl);
-  http.addHeader("Content-Type", "application/json");
+      StaticJsonDocument<2048> responseDoc;
+      DeserializationError error = deserializeJson(responseDoc, payload);
 
-  int httpCode = http.POST(requestBody);
+      if (!error && responseDoc.containsKey("candidates") && 
+          responseDoc["candidates"][0].containsKey("content") && 
+          responseDoc["candidates"][0]["content"].containsKey("parts") && 
+          responseDoc["candidates"][0]["content"]["parts"][0].containsKey("text")) {
 
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    Serial.println("🔄 Gemini API Response received");
-
-    StaticJsonDocument<2048> responseDoc;
-    DeserializationError error = deserializeJson(responseDoc, payload);
-
-    if (!error && responseDoc.containsKey("candidates") && 
-        responseDoc["candidates"][0].containsKey("content") && 
-        responseDoc["candidates"][0]["content"].containsKey("parts") && 
-        responseDoc["candidates"][0]["content"]["parts"][0].containsKey("text")) {
-
-      String aiMessage = responseDoc["candidates"][0]["content"]["parts"][0]["text"].as<String>();
-      
-      // Verify we got a non-empty response before updating
-      if (aiMessage.length() > 0) {
+        String aiMessage = responseDoc["candidates"][0]["content"]["parts"][0]["text"].as<String>();
         AISuggestion = aiMessage;
-        Serial.println("\n==== 🤖 AI WEATHER SUGGESTION 🤖 ====");
+
+        Serial.println("\n==== AI WEATHER SUGGESTION ====");
         Serial.println(aiMessage);
-        Serial.println("======================================\n");
+        Serial.println("===============================\n");
+        
+        // Show success on LCD
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("AI Data Received");
+        delay(1000);
+        
         success = true;
       } else {
-        Serial.println("❌ Received empty response from Gemini API");
+        Serial.println("Error parsing Gemini API response");
       }
     } else {
-      Serial.println("❌ Error parsing Gemini API response");
-      if (error) {
-        Serial.print("DeserializationError: ");
-        Serial.println(error.c_str());
+      Serial.print("Failed to connect to Gemini API, HTTP code: ");
+      Serial.println(httpCode);
+      
+      // For error code -1 (connection refused), try to troubleshoot
+      if (httpCode == -1) {
+        troubleshootHTTPConnection(httpCode, "generativelanguage.googleapis.com");
+        
+        // Wait a bit longer between retries after troubleshooting
+        delay(3000);
+      } else {
+        // For other errors, just wait a bit before retrying
+        delay(1000);
       }
     }
-  } else {
-    Serial.print("❌ Failed to connect to Gemini API, HTTP code: ");
-    Serial.println(httpCode);
-    Serial.println("Request Body: " + requestBody);
+    
+    http.end();
   }
+  
+  // If all attempts failed, use fallback
+  if (!success) {
+    prepareFallbackAISuggestion();
+  }
+}
 
-  http.end();
-  
-  // If API call failed but we have an existing AI suggestion, we can still return true
-  // to indicate we can continue with what we have
-  if (!success && AISuggestion.length() > 0) {
-    Serial.println("⚠️ Using existing AI suggestion as fallback");
-    return true;
+// Helper function to prepare a fallback AI suggestion when the API call fails
+void prepareFallbackAISuggestion() {
+  // Prepare a simple fallback message based on current weather
+  if (weatherDescription.indexOf("rain") >= 0) {
+    AISuggestion = "PRAF Technology Weather Update: Umuulan sa " + location + 
+                   ", maaring magkaroon ng pagbaha sa mababang lugar. Mag-ingat at maghanda sa posibleng pagbaha.";
+  } else {
+    AISuggestion = "PRAF Technology Weather Update: Ang panahon sa " + location + 
+                   " ay " + weatherDescription + " na may temperatura ng " + String(temperature, 1) + 
+                   "°C. Mag-ingat at uminom ng maraming tubig.";
   }
   
-  return success;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Using Backup Data");
+  delay(1000);
 }
 
 void getNumbers() {
-  if (WiFi.status() != WL_CONNECTED) {
-    reconnectWiFi();
+  // Check and ensure WiFi connection
+  if (!ensureWiFiConnection()) {
+    return;
   }
 
   // Clear the existing phone numbers array
   registeredPhoneNumbers.clear();
 
-  HTTPClient http;
-  String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName;
+  // Update LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Getting Numbers");
+  
+  // Try up to 3 times with error handling
+  bool success = false;
+  int maxAttempts = 3;
+  
+  for (int attempt = 0; attempt < maxAttempts && !success; attempt++) {
+    if (attempt > 0) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Numbers Retry #" + String(attempt));
+      delay(1000);
+    }
+    
+    Serial.print("Attempt ");
+    Serial.print(attempt + 1);
+    Serial.println(" fetching numbers from Supabase...");
+    
+    // Create a secure client for HTTPS
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Skip certificate validation
+    
+    HTTPClient http;
+    http.setTimeout(10000); // Increase timeout
+    
+    String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName;
+    
+    // Use WiFiClientSecure with begin
+    http.begin(secureClient, endpoint);
+    http.addHeader("apikey", supabaseKey);
+    http.addHeader("Authorization", "Bearer " + String(supabaseKey));
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Prefer", "return=representation");
+    
+    int httpResponseCode = http.GET();
 
-  http.begin(endpoint);
-  http.addHeader("apikey", supabaseKey);
-  http.addHeader("Authorization", "Bearer " + String(supabaseKey));
-  http.addHeader("Content-Type", "application/json");
+    if (httpResponseCode == 200) {
+      String response = http.getString();
 
-  int httpResponseCode = http.GET();
+      // Parse JSON response
+      DynamicJsonDocument doc(2048);
+      DeserializationError error = deserializeJson(doc, response);
 
-  if (httpResponseCode == 200) {
-    String response = http.getString();
+      if (error) {
+        Serial.print("JSON deserialization failed: ");
+        Serial.println(error.c_str());
+      } else {
+        JsonArray array = doc.as<JsonArray>();
 
-    // Parse JSON response
-    DynamicJsonDocument doc(2048);
-    DeserializationError error = deserializeJson(doc, response);
+        Serial.print("Found ");
+        Serial.print(array.size());
+        Serial.println(" phone numbers.");
 
-    if (error) {
-      Serial.print("JSON deserialization failed: ");
-      Serial.println(error.c_str());
-    } else {
-      JsonArray array = doc.as<JsonArray>();
+        for (JsonVariant entry : array) {
+          int id = entry["id"];
+          String number = entry["number"].as<String>();
 
-      Serial.print("Found ");
-      Serial.print(array.size());
-      Serial.println(" phone numbers.");
+          // Add number to our array
+          registeredPhoneNumbers.push_back(number);
 
-      for (JsonVariant entry : array) {
-        int id = entry["id"];
-        String number = entry["number"].as<String>();
+          // Add ID to our known IDs list if not already there
+          bool isNewId = true;
+          for (int knownId : knownIds) {
+            if (id == knownId) {
+              isNewId = false;
+              break;
+            }
+          }
 
-        // Add number to our array
-        registeredPhoneNumbers.push_back(number);
+          if (isNewId) {
+            digitalWrite(AI_LED_ONE, HIGH);
+            digitalWrite(AI_LED_TWO, HIGH);
+            digitalWrite(AI_LED_THREE, HIGH);
 
-        // Add ID to our known IDs list if not already there
-        bool isNewId = true;
-        for (int knownId : knownIds) {
-          if (id == knownId) {
-            isNewId = false;
-            break;
+            knownIds.push_back(id);
+            Serial.print("New Number Added: ");
+            Serial.println(number);
+
+            delay(1500);
+
+            digitalWrite(AI_LED_ONE, LOW);
+            digitalWrite(AI_LED_TWO, LOW);
+            digitalWrite(AI_LED_THREE, LOW);
           }
         }
 
-        if (isNewId) {
-          digitalWrite(AI_LED_ONE, HIGH);
-          digitalWrite(AI_LED_TWO, HIGH);
-          digitalWrite(AI_LED_THREE, HIGH);
-
-          knownIds.push_back(id);
-          Serial.print("New Number Added: ");
-          Serial.println(number);
-
-          delay(1500);
-
-          digitalWrite(AI_LED_ONE, LOW);
-          digitalWrite(AI_LED_TWO, LOW);
-          digitalWrite(AI_LED_THREE, LOW);
-        }
+        Serial.print("Total registered numbers: ");
+        Serial.println(registeredPhoneNumbers.size());
+        
+        // Show success on LCD
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Numbers Loaded");
+        lcd.setCursor(0, 1);
+        lcd.print("Total: " + String(registeredPhoneNumbers.size()));
+        delay(1000);
+        
+        success = true;
       }
-
-      Serial.print("Total registered numbers: ");
-      Serial.println(registeredPhoneNumbers.size());
+    } else {
+      Serial.print("Error getting entries. HTTP Response code: ");
+      Serial.println(httpResponseCode);
+      
+      // For error code -1 (connection refused), try to troubleshoot
+      if (httpResponseCode == -1) {
+        troubleshootHTTPConnection(httpResponseCode, "supabase.co");
+        
+        // Wait a bit longer between retries after troubleshooting
+        delay(3000);
+      } else {
+        // For other errors, just wait a bit before retrying
+        delay(1000);
+      }
     }
-  } else {
-    Serial.print("Error getting entries. HTTP Response code: ");
-    Serial.println(httpResponseCode);
+    
+    http.end();
   }
-
-  http.end();
+  
+  Serial.println("Registered phone numbers:");
+  for (const String& number : registeredPhoneNumbers) {
+    Serial.println(number);
+  }
 }
 
 // CHECKPOINT #2
 
-void reconnectWiFi() {
-  Serial.println("WiFi not connected. Attempting to reconnect...");
-  while (!WiFi.reconnect()) {
-    Serial.println("Reconnecting to WiFi...");
-    delay(500);
+bool checkInternetConnection() {
+  HTTPClient http;
+  http.setTimeout(5000); // 5 second timeout
+  
+  // Use a lightweight endpoint
+  const char* testUrl = "http://www.google.com";
+  
+  Serial.println("Testing internet connectivity...");
+  http.begin(testUrl);
+  int httpCode = http.GET();
+  http.end();
+  
+  if (httpCode == HTTP_CODE_OK) {
+    Serial.println("✅ Internet connection available");
+    return true;
+  } else {
+    Serial.print("❌ Internet connection test failed, HTTP code: ");
+    Serial.println(httpCode);
+    return false;
   }
-  Serial.println("WiFi reconnected.");
+}
+
+void reconnectWiFi() {
+  // Don't try to reconnect if we're already trying to connect
+  static bool reconnecting = false;
+  if (reconnecting) return;
+  
+  reconnecting = true;
+  
+  // Simple approach - disconnect and reconnect
+  Serial.println("Reconnecting to WiFi...");
+  
+  // Update LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Reconnect");
+  
+  // Disconnect first
+  WiFi.disconnect();
+  delay(1000);
+  
+  // Try to connect
+  WiFi.begin(SSID, PASSWORD);
+  
+  // Wait up to 10 seconds
+  int timeout = 10;
+  while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+    delay(1000);
+    Serial.print(".");
+    lcd.setCursor(10-timeout, 1);
+    lcd.print(".");
+    timeout--;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi reconnected successfully");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected!");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(1000);
+  } else {
+    Serial.println("\nWiFi reconnection failed");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed");
+    lcd.setCursor(0, 1);
+    lcd.print("Check settings");
+  }
+  
+  reconnecting = false;
+}
+
+// Simple function to ensure WiFi is connected before API calls
+bool ensureWiFiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+    return (WiFi.status() == WL_CONNECTED);
+  }
+  return true;
 }
