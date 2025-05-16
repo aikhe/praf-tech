@@ -101,6 +101,11 @@ volatile bool sensorStabilized = false;   // Flag to indicate sensor readings ha
 volatile int stabilizationReadings = 0;   // Counter for stabilization readings
 unsigned long startupTime = 0;  // Track when system started
 
+// Audio playback status and SMS delay
+volatile bool audioPlaybackFinished = false;
+SemaphoreHandle_t audioStatusMutex;
+TaskHandle_t audioTaskHandle = NULL;
+
 // LCD Setup - Assuming standard 16x2 I2C LCD at address 0x27
 // Adjust address if your LCD uses a different one
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -122,6 +127,7 @@ bool lcdTextLocked = false;           // Whether LCD is showing locked text
 // Task function prototypes
 void readDistanceTask(void *parameter);
 void controlOutputsTask(void *parameter);
+void smsSendDelayTask(void *parameter);
 
 // SMS message function prototypes
 void createAlertSMS(float distance);
@@ -410,13 +416,31 @@ void controlOutputsTask(void *parameter) {
             createAlertSMS(distance);
             Serial.println("Created Alert SMS for Level 1");
             
+            // Reset audio playback finished flag before starting new playback
+            if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+              audioPlaybackFinished = false;
+              xSemaphoreGive(audioStatusMutex);
+            }
+            
             // Play audio when Level 1 flood is detected
-            Serial.println("Level 1 flood detected! Playing audio...");
+            Serial.println("Level 1 flood detected! Playing LOW-FLOOD-HIGH.mp3");
+            static const char* floodAudioFile = "/LOW-FLOOD-HIGH.mp3";
             xTaskCreate(
               audioPlaybackTask,    // Task function
               "AudioTask",          // Task name
               4096,                 // Stack size
-              NULL,                 // Task parameters
+              (void*)floodAudioFile, // Task parameter - audio filename
+              1,                    // Task priority
+              &audioTaskHandle     // Save task handle to check status
+            );
+            
+            // Create a task to wait for audio to finish, then send SMS
+            static int floodLevel = 1;
+            xTaskCreate(
+              smsSendDelayTask,     // Task function
+              "SMSDelayTask",       // Task name
+              4096,                 // Stack size
+              &floodLevel,          // Current flood level
               1,                    // Task priority
               NULL                  // Task handle
             );
@@ -425,21 +449,74 @@ void controlOutputsTask(void *parameter) {
           case 2: // Critical
             createCriticalSMS(distance);
             Serial.println("Created Critical SMS for Level 2");
+            
+            // Reset audio playback finished flag before starting new playback
+            if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+              audioPlaybackFinished = false;
+              xSemaphoreGive(audioStatusMutex);
+            }
+            
+            // Play audio when Level 2 flood is detected
+            Serial.println("Level 2 flood detected! Playing MEDIUM-FLOOD-HIGH2.mp3");
+            static const char* mediumFloodAudioFile = "/MEDIUM-FLOOD-HIGH2.mp3";
+            xTaskCreate(
+              audioPlaybackTask,    // Task function
+              "AudioTask",          // Task name
+              4096,                 // Stack size
+              (void*)mediumFloodAudioFile, // Task parameter - audio filename
+              1,                    // Task priority
+              &audioTaskHandle     // Save task handle to check status
+            );
+            
+            // Create a task to wait for audio to finish, then send SMS
+            static int mediumFloodLevel = 2;
+            xTaskCreate(
+              smsSendDelayTask,     // Task function
+              "SMSDelayTask",       // Task name
+              4096,                 // Stack size
+              &mediumFloodLevel,    // Current flood level
+              1,                    // Task priority
+              NULL                  // Task handle
+            );
             break;
             
           case 3: // Warning
             createWarningSMS(distance);
             Serial.println("Created Warning SMS for Level 3");
+            
+            // Reset audio playback finished flag before starting new playback
+            if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+              audioPlaybackFinished = false;
+              xSemaphoreGive(audioStatusMutex);
+            }
+            
+            // Play audio when Level 3 flood is detected
+            Serial.println("Level 3 flood detected! Playing HIGH-FLOOD-HIGH2.mp3");
+            static const char* highFloodAudioFile = "/HIGH-FLOOD-HIGH2.mp3";
+            xTaskCreate(
+              audioPlaybackTask,    // Task function
+              "AudioTask",          // Task name
+              4096,                 // Stack size
+              (void*)highFloodAudioFile, // Task parameter - audio filename
+              1,                    // Task priority
+              &audioTaskHandle     // Save task handle to check status
+            );
+            
+            // Create a task to wait for audio to finish, then send SMS
+            static int highFloodLevel = 3;
+            xTaskCreate(
+              smsSendDelayTask,     // Task function
+              "SMSDelayTask",       // Task name
+              4096,                 // Stack size
+              &highFloodLevel,      // Current flood level
+              1,                    // Task priority
+              NULL                  // Task handle
+            );
             break;
         }
         
-        // Queue SMS to be sent - use a specific signal value for each level
-        int signalValue = 10 + currentRange; // 11=Alert, 12=Critical, 13=Warning
-        if (xQueueSend(smsQueue, &signalValue, 0) == pdTRUE) {
-          Serial.printf("Queued SMS for flood level %d\n", currentRange);
-        } else {
-          Serial.println("Failed to queue SMS - queue might be full");
-        }
+        // SMS for all flood levels (1, 2, and 3) are now queued in the smsSendDelayTask
+        // after respective audio files finish playing and a 5-second delay
         
       } else if (currentRange != lastDetectedRange && currentRange > 0) {
         // Range changed but within debounce period - ignore the change
@@ -1078,12 +1155,12 @@ void buttonTask(void *pvParameters) {
       if (ai == LOW) {
         Serial.println("AI Button pressed! Playing audio...");
         
-        // Create audio playback task
+        // Create audio playback task with default audio file
         xTaskCreate(
           audioPlaybackTask,    // Task function
           "AudioTask",          // Task name
           4096,                 // Stack size
-          NULL,                 // Task parameters
+          NULL,                 // Task parameters (NULL = use default audio)
           1,                    // Task priority
           NULL                  // Task handle
         );
@@ -1211,8 +1288,17 @@ void wifiTask(void *pvParameters) {
 void audioPlaybackTask(void *parameter) {
   Serial.println("Starting audio playback task");
   
+  // Determine which file to play based on task parameter
+  const char* filename = (const char*)parameter;
+  if (filename == NULL) {
+    filename = "/DEVICE-START-VOICE.mp3";  // Default file if no parameter
+  }
+  
+  Serial.print("Opening audio file: ");
+  Serial.println(filename);
+  
   // Open MP3 file from SD card
-  mp3File = SD.open("/DEVICE-START-VOICE.mp3");
+  mp3File = SD.open(filename);
   if (!mp3File) {
     Serial.println("Failed to open MP3 file!");
     vTaskDelete(NULL);
@@ -1249,7 +1335,53 @@ void audioPlaybackTask(void *parameter) {
   
   Serial.println("Audio playback completed");
   
+  // Set flag that audio playback is finished
+  if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+    audioPlaybackFinished = true;
+    xSemaphoreGive(audioStatusMutex);
+  }
+  
   // Delete this task when done
+  vTaskDelete(NULL);
+}
+
+// Task to wait for audio playback to finish before sending SMS
+void smsSendDelayTask(void *parameter) {
+  int floodLevel = *((int*)parameter);
+  Serial.printf("Starting SMS delay task for flood level %d\n", floodLevel);
+  
+  // Wait for audio playback to finish
+  bool isAudioFinished = false;
+  while (!isAudioFinished) {
+    if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+      isAudioFinished = audioPlaybackFinished;
+      xSemaphoreGive(audioStatusMutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(100)); // Check every 100ms
+  }
+  
+  Serial.println("Audio playback finished. Waiting additional 5 seconds before sending SMS...");
+  
+  // Wait additional 5 seconds
+  vTaskDelay(pdMS_TO_TICKS(5000));
+  
+  Serial.printf("Delay completed. Queuing SMS for flood level %d\n", floodLevel);
+  
+  // Queue SMS with appropriate signal value
+  int signalValue = 10 + floodLevel; // 11=Alert, 12=Critical, 13=Warning
+  if (xQueueSend(smsQueue, &signalValue, 0) == pdTRUE) {
+    Serial.printf("Queued SMS for flood level %d\n", floodLevel);
+  } else {
+    Serial.println("Failed to queue SMS - queue might be full");
+  }
+  
+  // Reset audio playback flag for next time
+  if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+    audioPlaybackFinished = false;
+    xSemaphoreGive(audioStatusMutex);
+  }
+  
+  // Delete this task
   vTaskDelete(NULL);
 }
 
@@ -1319,6 +1451,7 @@ void setup() {
   // Create mutexes
   phoneNumbersMutex = xSemaphoreCreateMutex();
   weatherDataMutex = xSemaphoreCreateMutex();
+  audioStatusMutex = xSemaphoreCreateMutex();
   
   // Create queue for button events
   smsQueue = xQueueCreate(5, sizeof(int));
