@@ -97,6 +97,8 @@ const char* password = "gisaniel924";
 volatile float currentDistance = 0;
 SemaphoreHandle_t distanceMutex;
 volatile bool systemInitialized = false;  // Add initialization flag
+volatile bool sensorStabilized = false;   // Flag to indicate sensor readings have stabilized
+volatile int stabilizationReadings = 0;   // Counter for stabilization readings
 unsigned long startupTime = 0;  // Track when system started
 
 // LCD Setup - Assuming standard 16x2 I2C LCD at address 0x27
@@ -212,6 +214,14 @@ void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
  */
 void readDistanceTask(void *parameter) {
   float distance;
+  // Initialize distance to a safe value that won't trigger alerts
+  float safeDistance = 100.0;  // 100cm - well above any alert threshold
+  
+  // Update shared variable with safe initial value
+  if (xSemaphoreTake(distanceMutex, portMAX_DELAY) == pdTRUE) {
+    currentDistance = safeDistance;
+    xSemaphoreGive(distanceMutex);
+  }
  
   while(true) {
     // Clears the TRIG_PIN
@@ -229,14 +239,27 @@ void readDistanceTask(void *parameter) {
     // Calculate the distance
     distance = duration * SOUND_SPEED / 2;
     
-    // Print the distance on the Serial Monitor
-    // Serial.print("Distance: ");
-    // Serial.print(distance);
-    // Serial.println(" cm");
+    // Validate reading - ignore unreasonable values
+    if (distance <= 0 || distance > 400) {  // 400cm is max range for HC-SR04
+      // Serial.println("Invalid distance reading, ignoring");
+      vTaskDelay(DISTANCE_READ_INTERVAL / portTICK_PERIOD_MS);
+      continue;
+    }
     
     // Update the shared distance variable with mutex protection
     if (xSemaphoreTake(distanceMutex, portMAX_DELAY) == pdTRUE) {
       currentDistance = distance;
+      
+      // If system is initialized but sensor not yet stabilized, count readings
+      if (systemInitialized && !sensorStabilized) {
+        stabilizationReadings++;
+        // After 10 valid readings, consider sensor stabilized
+        if (stabilizationReadings >= 10) {
+          sensorStabilized = true;
+          Serial.println("Sensor readings have stabilized");
+        }
+      }
+      
       xSemaphoreGive(distanceMutex);
     }
     
@@ -289,8 +312,8 @@ void controlOutputsTask(void *parameter) {
       xSemaphoreGive(distanceMutex);
     }
     
-    // Only process alerts if system is initialized
-    if (systemInitialized) {
+    // Only process alerts if system is initialized AND sensor has stabilized
+    if (systemInitialized && sensorStabilized) {
       // Determine current range based on distance
       // Only consider valid levels (no "normal" state)
       if (distance <= 15) {
@@ -386,11 +409,24 @@ void controlOutputsTask(void *parameter) {
           case 1: // Alert
             createAlertSMS(distance);
             Serial.println("Created Alert SMS for Level 1");
+            
+            // Play audio when Level 1 flood is detected
+            Serial.println("Level 1 flood detected! Playing audio...");
+            xTaskCreate(
+              audioPlaybackTask,    // Task function
+              "AudioTask",          // Task name
+              4096,                 // Stack size
+              NULL,                 // Task parameters
+              1,                    // Task priority
+              NULL                  // Task handle
+            );
             break;
+            
           case 2: // Critical
             createCriticalSMS(distance);
             Serial.println("Created Critical SMS for Level 2");
             break;
+            
           case 3: // Warning
             createWarningSMS(distance);
             Serial.println("Created Warning SMS for Level 3");
@@ -439,6 +475,15 @@ void controlOutputsTask(void *parameter) {
         
         Serial.println("Timeout reached (10 minutes) - All outputs turned off");
       }
+    } else if (systemInitialized && !sensorStabilized) {
+      // System initialized but waiting for sensor to stabilize
+      // lcd.clear();
+      // lcd.setCursor(0, 0);
+      // lcd.print("Stabilizing");
+      // lcd.setCursor(0, 1);
+      // lcd.print("Sensor: ");
+      // lcd.print(stabilizationReadings);
+      // lcd.print("/10");
     }
     
     // Wait before next update
@@ -1029,13 +1074,21 @@ void buttonTask(void *pvParameters) {
     
     // If enough time has passed since last state change
     if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastDebounceTime) > DEBOUNCE_DELAY) {
-      // If button is pressed (LOW)
+      // If AI button is pressed (LOW)
       if (ai == LOW) {
-        Serial.println("Button pressed! AI SMS...");
-        Serial.println(aiWeatherMessage);
-
-        // listDir(SD, "/", 0);
-
+        Serial.println("AI Button pressed! Playing audio...");
+        
+        // Create audio playback task
+        xTaskCreate(
+          audioPlaybackTask,    // Task function
+          "AudioTask",          // Task name
+          4096,                 // Stack size
+          NULL,                 // Task parameters
+          1,                    // Task priority
+          NULL                  // Task handle
+        );
+        
+        // Wait for button release to prevent multiple triggers
         while (digitalRead(BTTN_AI) == LOW) {
           vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -1210,6 +1263,8 @@ void setup() {
   // Record startup time
   startupTime = millis();
   systemInitialized = false;  // Ensure system starts uninitialized
+  sensorStabilized = false;   // Ensure sensor starts unstabilized
+  stabilizationReadings = 0;  // Reset stabilization counter
 
   // Initialize LCD
   Wire.begin();
@@ -1221,6 +1276,16 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Starting...");
   delay(1000);
+
+  // Configure LED pins first and make sure they're off
+  pinMode(LED_ONE, OUTPUT);
+  pinMode(LED_TWO, OUTPUT);
+  pinMode(LED_THREE, OUTPUT);
+ 
+  // Explicitly turn off all LEDs at startup
+  digitalWrite(LED_ONE, LOW);
+  digitalWrite(LED_TWO, LOW);
+  digitalWrite(LED_THREE, LOW);
 
   Serial.println("\nESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration");
 
@@ -1238,17 +1303,11 @@ void setup() {
   // Configure HC-SR04 pins
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
- 
-  // Configure LED pins
-  pinMode(LED_ONE, OUTPUT);
-  pinMode(LED_TWO, OUTPUT);
-  pinMode(LED_THREE, OUTPUT);
- 
-  // Initially turn off all LEDs
-  digitalWrite(LED_ONE, LOW);
-  digitalWrite(LED_TWO, LOW);
-  digitalWrite(LED_THREE, LOW);
- 
+
+  // Configure button pins after LEDs
+  pinMode(BTTN_SMS, INPUT_PULLUP);
+  pinMode(BTTN_AI, INPUT_PULLUP);
+  
   // Create mutex for shared data protection
   distanceMutex = xSemaphoreCreateMutex();
   
@@ -1256,10 +1315,6 @@ void setup() {
   lastLCDUpdateTime = 0;
   currentDisplayedStatus = "Normal";
   lcdTextLocked = false;
-  
-  // Set button pin as input with internal pull-up resistor
-  pinMode(BTTN_SMS, INPUT_PULLUP);
-  pinMode(BTTN_AI, INPUT_PULLUP);
   
   // Create mutexes
   phoneNumbersMutex = xSemaphoreCreateMutex();
@@ -1281,15 +1336,8 @@ void setup() {
   // List files on SD card
   listDir(SD, "/", 0);
 
-  // Create audio playback task to play startup sound
-  xTaskCreate(
-    audioPlaybackTask,    // Task function
-    "AudioTask",          // Task name
-    4096,                 // Stack size
-    NULL,                 // Task parameters
-    1,                    // Task priority
-    NULL                  // Task handle
-  );
+  // Audio will play only when AI button is pressed
+  // Removed automatic audio playback task creation
 
   // Create FreeRTOS tasks
   xTaskCreate(
