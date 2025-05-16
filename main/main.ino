@@ -1360,10 +1360,18 @@ void smsSendDelayTask(void *parameter) {
     vTaskDelay(pdMS_TO_TICKS(100)); // Check every 100ms
   }
   
-  Serial.println("Audio playback finished. Waiting additional 5 seconds before sending SMS...");
+  // Different delay times based on flood level
+  int delaySeconds = 5; // Default for levels 1 and 2
   
-  // Wait additional 5 seconds
-  vTaskDelay(pdMS_TO_TICKS(5000));
+  // Use 8 seconds delay for high flood level (level 3)
+  if (floodLevel == 3) {
+    delaySeconds = 8;
+  }
+  
+  Serial.printf("Audio playback finished. Waiting additional %d seconds before sending SMS...\n", delaySeconds);
+  
+  // Wait the specified delay time
+  vTaskDelay(pdMS_TO_TICKS(delaySeconds * 1000));
   
   Serial.printf("Delay completed. Queuing SMS for flood level %d\n", floodLevel);
   
