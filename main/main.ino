@@ -48,6 +48,15 @@ EncodedAudioStream decoder(&i2sStream, &mp3Decoder);
 File mp3File;
 StreamCopy copier;
 
+// TTS components
+URLStream url; // Will be initialized after WiFi credentials are defined
+EncodedAudioStream ttsDecoder(&i2sStream, &mp3Decoder);
+StreamCopy ttsCopier(ttsDecoder, url);
+
+// Google TTS URL template
+const char* queryTemplate = "http://translate.google.com/translate_tts"
+                            "?ie=UTF-8&tl=%1&client=tw-ob&ttsspeed=%2&q=%3";
+
 // // Create Audio object
 // Audio audio;
 // Audio *audio = nullptr;  // no global instantiation
@@ -70,10 +79,10 @@ StreamCopy copier;
 // }
 
 // CHECKPOINT
-
+  
 // WiFi credentials
-const char* ssid = "TK-gacura";
-const char* password = "gisaniel924";
+const char* ssid = "Doogy";
+const char* password = "March136647";
 
 // HC-SR04 Sensor pins
 #define TRIG_PIN 17
@@ -83,6 +92,9 @@ const char* password = "gisaniel924";
 #define LED_ONE 13
 #define LED_TWO 12
 #define LED_THREE 14
+#define AI_LED_ONE 32
+#define AI_LED_TWO 15
+#define AI_LED_THREE 33
 
 // Constants
 #define SOUND_SPEED 0.034  // Sound speed in cm/uS
@@ -121,13 +133,14 @@ unsigned long lastLCDUpdateTime = 0;  // Track last LCD update time
 String currentDisplayedStatus = "";   // Track last status display to avoid unnecessary updates
 unsigned long lcdLockStartTime = 0;   // When the LCD text was locked
 bool lcdTextLocked = false;           // Whether LCD is showing locked text
-#define LCD_LOCK_TIME_MS 5000         // 5 seconds to lock LCD text after level detection
+#define LCD_LOCK_TIME_MS 60000         // 5 seconds to lock LCD text after level detection
 #define LCD_UPDATE_INTERVAL 4000      // ms - longer interval for normal updates
 
 // Task function prototypes
 void readDistanceTask(void *parameter);
 void controlOutputsTask(void *parameter);
 void smsSendDelayTask(void *parameter);
+void waitForAudioThenTTS(void *parameter);
 
 // SMS message function prototypes
 void createAlertSMS(float distance);
@@ -135,12 +148,12 @@ void createCriticalSMS(float distance);
 void createWarningSMS(float distance);
 
 // HttpSMS API key
-const char* httpSmsApiKey = "MNJmgF7kRvUrTfj4fqDUbrzwoVFpMToWdTbiUx3sQ6jreYnbnu7bym-rQG3kB8_U";
+const char* httpSmsApiKey = "uk_eLFe3Xme9Qn2jhXLt2bPA9b_xVWZMSlDDpRMmFOzl9CoAGdAe-fzRmmCXEZ5AkMa";
 
 // Supabase configuration
 const char* supabaseUrl = "https://jursmglsfqaqrxvirtiw.supabase.co";
 const char* supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp1cnNtZ2xzZnFhcXJ4dmlydGl3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ3ODkxOTEsImV4cCI6MjA2MDM2NTE5MX0.ajGbf9fLrYAA0KXzYhGFCTju-d4h-iTYTeU5WfITj3k";
-const char* tableName = "resident_number";
+const char* tableName = "phone_numbers";
 
 // Weather API configuration
 const char* weatherApiKey = "7970309436bc52d518c7e71e314b8053";
@@ -164,6 +177,7 @@ String aiWeatherMessage = "Sa kasalukuyan, walang banta ng baha sa Caloocan. Ang
 // SMS configuration
 const char* smsFrom = "+639649687066"; // Your sender number or name
 String phoneNumbers[20]; // Array to store up to 10 phone numbers
+String phoneNames[20]; // Array to store corresponding names for personalization
 int numPhoneNumbers = 0;
 char smsBody[1024]; // Buffer for dynamic SMS content
 
@@ -177,9 +191,16 @@ TaskHandle_t buttonTaskHandle = NULL;
 TaskHandle_t wifiTaskHandle = NULL;
 TaskHandle_t databaseTaskHandle = NULL;
 TaskHandle_t weatherTaskHandle = NULL;
+TaskHandle_t ledTaskHandle = NULL;
 QueueHandle_t smsQueue = NULL;
 SemaphoreHandle_t phoneNumbersMutex = NULL;
 SemaphoreHandle_t weatherDataMutex = NULL;
+
+// TTS function prototypes
+void ttsPlaybackTask(void* parameter);
+String makeTTSUrl(const String& chunk, const char* lang, const char* speed);
+void splitText(const String& text, size_t maxLen, std::vector<String>& outChunks);
+String urlEncode(const String& text);
 
 // Recursively list a directory and its children
 void listDir(fs::FS &fs, const char * dirname, uint8_t levels) {
@@ -275,6 +296,49 @@ void readDistanceTask(void *parameter) {
 }
 
 /**
+ * LED Animation Task
+ */
+void ledAnimationTask(void *parameter) {
+  // Define sequence
+  int leds[] = { AI_LED_ONE, AI_LED_TWO, AI_LED_THREE };
+  int sequence[] = { 0, 1, 2, 0, 1, 2, -1 };  // -1 = all LEDs on
+  int currentStep = 0;
+  
+  // Run LED sequence while audio is playing or animation not complete
+  while (currentStep < 7) {
+    // Turn off all LEDs before applying the next step
+    for (int j = 0; j < 3; j++) {
+      digitalWrite(leds[j], LOW);
+    }
+    
+    if (currentStep < 7) {
+      if (sequence[currentStep] == -1) {
+        // Turn all LEDs ON
+        vTaskDelay(pdMS_TO_TICKS(200));
+        for (int j = 0; j < 3; j++) {
+          digitalWrite(leds[j], HIGH);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(8000));
+      } else {
+        digitalWrite(leds[sequence[currentStep]], HIGH);
+      }
+      currentStep++;
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+  
+  // Turn off all LEDs when done
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(leds[i], LOW);
+  }
+  
+  // Delete the task
+  vTaskDelete(NULL);
+}
+
+/**
  * Combined task to control both LEDs and LCD based on the measured distance
  */
 void controlOutputsTask(void *parameter) {
@@ -295,7 +359,7 @@ void controlOutputsTask(void *parameter) {
         // Clear LCD and show ready message
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("System Ready");
+        lcd.print("PRAF System");
         lcd.setCursor(0, 1);
         lcd.print("Monitoring...");
         delay(2000);  // Show ready message for 2 seconds
@@ -322,10 +386,10 @@ void controlOutputsTask(void *parameter) {
     if (systemInitialized && sensorStabilized) {
       // Determine current range based on distance
       // Only consider valid levels (no "normal" state)
-      if (distance <= 15) {
+      if (distance <= 10) {
         currentRange = 3;  // Close range - Warning
         statusMessage = "Warning";
-      } else if (distance <= 25) {
+      } else if (distance <= 20) {
         currentRange = 2;  // Medium range - Critical
         statusMessage = "Critical";
       } else if (distance <= 40) {
@@ -552,17 +616,8 @@ void controlOutputsTask(void *parameter) {
         
         Serial.println("Timeout reached (10 minutes) - All outputs turned off");
       }
-    } else if (systemInitialized && !sensorStabilized) {
-      // System initialized but waiting for sensor to stabilize
-      // lcd.clear();
-      // lcd.setCursor(0, 0);
-      // lcd.print("Stabilizing");
-      // lcd.setCursor(0, 1);
-      // lcd.print("Sensor: ");
-      // lcd.print(stabilizationReadings);
-      // lcd.print("/10");
     }
-    
+
     // Wait before next update
     vTaskDelay(LED_UPDATE_INTERVAL / portTICK_PERIOD_MS);
   }
@@ -798,8 +853,7 @@ void updateSmsBody() {
       "°C. Pinapayuhan ang lahat na uminom ng maraming tubig at manatiling malamig.";
     
     snprintf(smsBody, sizeof(smsBody),
-      "🚨 FLOOD ALERT! 🚨\n\n"
-      "📱 System Check:\n\n"
+      "📱 PRAF TECHNOLOGY UPDATE 📱\n\n"
       "📍 Location: %s\n"
       "🌤️ Weather: %s\n"
       "🌡️ Temperature: %.1f°C\n"
@@ -807,6 +861,7 @@ void updateSmsBody() {
       "💧 Humidity: %.0f%%\n\n"
       "🤖 AI Weather Update:\n"
       "%s\n\n"
+      "Stay safe and informed!\n\n"
       "From: PRAF Technology",
       cityName.c_str(), localWeatherDesc.c_str(), localTemp, localFeelsLike, localHumidity,
       localAIMessage.c_str()
@@ -830,13 +885,10 @@ void createAlertSMS(float distance) {
     float localHumidity = humidity != 0.0 ? humidity : 70.0;
     
     snprintf(smsBody, sizeof(smsBody),
-      "⚠️ FLOOD ALERT - LEVEL 1 ⚠️\n\n"
+      "🟡 FLOOD ALERT - LEVEL 1 🟡\n\n"
       "📍 Location: %s\n"
       "🔍 Current water level: %.1f cm\n"
-      "⚠️ Status: ALERT - Initial flooding detected\n\n"
-      // "🌤️ Weather: %s\n"
-      // "🌡️ Temperature: %.1f°C\n"
-      // "💧 Humidity: %.0f%%\n\n"
+      "📢 Status: ALERT - Initial flooding detected\n\n"
       "🚨 PRECAUTIONS:\n"
       "- Monitor water levels\n"
       "- Prepare emergency supplies\n"
@@ -859,13 +911,10 @@ void createCriticalSMS(float distance) {
     float localHumidity = humidity != 0.0 ? humidity : 70.0;
     
     snprintf(smsBody, sizeof(smsBody),
-      "🔴 FLOOD CRITICAL - LEVEL 2 🔴\n\n"
+      "🟠 FLOOD CRITICAL - LEVEL 2 🟠\n\n"
       "📍 Location: %s\n"
       "🔍 Current water level: %.1f cm\n"
-      "⚠️ Status: CRITICAL - Significant flooding\n\n"
-      // "🌤️ Weather: %s\n"
-      // "🌡️ Temperature: %.1f°C\n"
-      // "💧 Humidity: %.0f%%\n\n"
+      "📢 Status: CRITICAL - Significant flooding\n\n"
       "🚨 URGENT ACTIONS REQUIRED:\n"
       "- Move valuables to higher ground\n"
       "- Prepare for possible evacuation\n"
@@ -889,19 +938,17 @@ void createWarningSMS(float distance) {
     float localHumidity = humidity != 0.0 ? humidity : 70.0;
     
     snprintf(smsBody, sizeof(smsBody),
-      "🚨 FLOOD WARNING - LEVEL 3 🚨\n\n"
+      "🔴 FLOOD WARNING - LEVEL 3 🔴\n\n"
       "📍 Location: %s\n"
       "🔍 Current water level: %.1f cm\n"
-      "⚠️ Status: WARNING - Severe flooding\n\n"
-      // "🌤️ Weather: %s\n"
-      // "🌡️ Temperature: %.1f°C\n"
-      // "💧 Humidity: %.0f%%\n\n"
+      "📢 Status: WARNING - Severe flooding\n\n"
       "🚨 EMERGENCY ACTIONS REQUIRED:\n"
       "- EVACUATE immediately if instructed\n"
       "- Move to higher ground NOW\n"
       "- Follow emergency routes\n"
       "- Do NOT attempt to cross floodwaters\n"
       "- Call emergency services if trapped\n\n"
+      "Stay safe.\n\n"
       "From: PRAF Technology Flood Monitoring System",
       cityName.c_str(), distance
     );
@@ -918,7 +965,7 @@ void fetchPhoneNumbers() {
   }
 
   HTTPClient http;
-  String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName + "?select=number";
+  String endpoint = String(supabaseUrl) + "/rest/v1/" + tableName + "?select=phone_number,name";
   
   http.begin(endpoint);
   http.addHeader("apikey", supabaseKey);
@@ -948,13 +995,18 @@ void fetchPhoneNumbers() {
         
         for (JsonVariant entry : array) {
           if (numPhoneNumbers < 10) { // Limit to array size
-            String number = entry["number"].as<String>();
+            String number = entry["phone_number"].as<String>();
             phoneNumbers[numPhoneNumbers] = number;
+            String name = entry["name"].as<String>();
+            phoneNames[numPhoneNumbers] = name;
             
             Serial.print("Number ");
             Serial.print(numPhoneNumbers + 1);
             Serial.print(": ");
-            Serial.println(number);
+            Serial.print(number);
+            Serial.print(" (");
+            Serial.print(name);
+            Serial.println(")");
             
             numPhoneNumbers++;
           }
@@ -978,9 +1030,15 @@ void fetchPhoneNumbers() {
 }
 
 // Function to send an SMS via HTTP
-void sendHttpSMS(const char* from, const char* to, const char* body) {
+void sendHttpSMS(const char* from, const char* to, const char* body, const char* recipientName = NULL) {
   Serial.print("Sending SMS to: ");
-  Serial.println(to);
+  Serial.print(to);
+  if (recipientName) {
+    Serial.print(" (");
+    Serial.print(recipientName);
+    Serial.print(")");
+  }
+  Serial.println();
   
   WiFiClientSecure client;
   client.setInsecure();
@@ -999,9 +1057,40 @@ void sendHttpSMS(const char* from, const char* to, const char* body) {
     return;
   }
   
+  // Create a personalized message if recipient name is provided
+  String personalizedBody = body;
+  if (recipientName && strlen(recipientName) > 0) {
+    // Check for different "From:" line variations
+    int fromIndex = personalizedBody.indexOf("From: PRAF Technology");
+    if (fromIndex < 0) {
+      // Try alternative "From:" line
+      fromIndex = personalizedBody.indexOf("From: PRAF Technology Flood Monitoring System");
+    }
+    
+    if (fromIndex > 0) {
+      // Find the end of the string or next newline after "From:"
+      int lineEndIndex = personalizedBody.length();
+      int nextNewline = personalizedBody.indexOf('\n', fromIndex);
+      if (nextNewline > 0) {
+        lineEndIndex = nextNewline;
+      }
+      
+      // Add "To:" line on a new line after "From:"
+      personalizedBody = personalizedBody.substring(0, lineEndIndex) + 
+                        "\nTo: " + String(recipientName) + 
+                        personalizedBody.substring(lineEndIndex);
+    } else {
+      // If no "From:" line found, append to end
+      personalizedBody += "\nTo: " + String(recipientName);
+    }
+    
+    Serial.println("Personalized message created:");
+    Serial.println(personalizedBody);
+  }
+  
   // Create JSON payload
   DynamicJsonDocument doc(1024);
-  doc["content"] = body;
+  doc["content"] = personalizedBody;
   doc["from"] = from;
   doc["to"] = to;
   String jsonPayload;
@@ -1153,16 +1242,49 @@ void buttonTask(void *pvParameters) {
     if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastDebounceTime) > DEBOUNCE_DELAY) {
       // If AI button is pressed (LOW)
       if (ai == LOW) {
-        Serial.println("AI Button pressed! Playing audio...");
-        
-        // Create audio playback task with default audio file
+        Serial.println("AI Button pressed! Starting TTS with weather message...");
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("AI Suggest");
+        lcd.setCursor(0, 1);
+        lcd.print("PRAF Tech");
+
+        // Create the LED animation task
         xTaskCreate(
-          audioPlaybackTask,    // Task function
-          "AudioTask",          // Task name
-          4096,                 // Stack size
-          NULL,                 // Task parameters (NULL = use default audio)
-          1,                    // Task priority
-          NULL                  // Task handle
+          ledAnimationTask,  // Task function
+          "LEDTask",         // Task name
+          2000,              // Stack size
+          NULL,              // Task parameters
+          1,                 // Priority
+          &ledTaskHandle     // Task handle
+        );
+        
+        // Get the weather message with mutex protection
+        String* weatherTextToSpeak = NULL;
+        
+        if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          weatherTextToSpeak = new String(aiWeatherMessage);
+          xSemaphoreGive(weatherDataMutex);
+        } else {
+          weatherTextToSpeak = new String("Hindi makuha ang weather update. Subukan ulit.");
+          Serial.println("Failed to get weather message, using default");
+        }
+        
+        // Reset audio playback flag before starting
+        if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+          audioPlaybackFinished = false;
+          xSemaphoreGive(audioStatusMutex);
+        }
+        
+        // Create TTS playback task with weather message
+        xTaskCreate(
+          ttsPlaybackTask,     // Task function
+          "TTSTask",           // Task name
+          8192,                // Stack size (doubled from audio task)
+          weatherTextToSpeak,  // Pass weather message as parameter
+          1,                   // Task priority
+          &audioTaskHandle     // Store task handle to check status
         );
         
         // Wait for button release to prevent multiple triggers
@@ -1199,7 +1321,7 @@ void databaseTask(void *pvParameters) {
       fetchPhoneNumbers();
     }
     // Check every 5 seconds for new phone numbers
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    vTaskDelay(pdMS_TO_TICKS(10000));
   }
 }
 
@@ -1265,7 +1387,7 @@ void wifiTask(void *pvParameters) {
               // Yield to prevent watchdog trigger
               vTaskDelay(pdMS_TO_TICKS(10));
               
-              sendHttpSMS(smsFrom, phoneNumbers[i].c_str(), smsBody);
+              sendHttpSMS(smsFrom, phoneNumbers[i].c_str(), smsBody, phoneNames[i].c_str());
               // Increased delay between sending messages to give more time for system tasks
               vTaskDelay(pdMS_TO_TICKS(1000));
               
@@ -1312,6 +1434,8 @@ void audioPlaybackTask(void *parameter) {
   i2sConfig.pin_data = I2S_DOUT;
   i2sConfig.buffer_size = 8192;  // Increase buffer size
   i2sConfig.buffer_count = 8;    // Increase buffer count
+  i2sConfig.channels        = 2;
+  i2sConfig.channel_format  = I2SChannelSelect::Stereo;
   i2sStream.begin(i2sConfig);
   
   // Initialize decoder
@@ -1361,11 +1485,11 @@ void smsSendDelayTask(void *parameter) {
   }
   
   // Different delay times based on flood level
-  int delaySeconds = 5; // Default for levels 1 and 2
+  int delaySeconds = 2; // Default for levels 1 and 2
   
   // Use 8 seconds delay for high flood level (level 3)
   if (floodLevel == 3) {
-    delaySeconds = 8;
+    delaySeconds = 4;
   }
   
   Serial.printf("Audio playback finished. Waiting additional %d seconds before sending SMS...\n", delaySeconds);
@@ -1390,6 +1514,197 @@ void smsSendDelayTask(void *parameter) {
   }
   
   // Delete this task
+  vTaskDelete(NULL);
+}
+
+// URL encode a string (for TTS API)
+String urlEncode(const String& text) {
+  String encoded = "";
+  char c;
+  char code0;
+  char code1;
+  
+  for (int i = 0; i < text.length(); i++) {
+    c = text.charAt(i);
+    if (c == ' ') {
+      encoded += '+';
+    } else if (isalnum(c)) {
+      encoded += c;
+    } else {
+      code1 = (c & 0xf) + '0';
+      if ((c & 0xf) > 9) {
+        code1 = (c & 0xf) - 10 + 'A';
+      }
+      c = (c >> 4) & 0xf;
+      code0 = c + '0';
+      if (c > 9) {
+        code0 = c - 10 + 'A';
+      }
+      encoded += '%';
+      encoded += code0;
+      encoded += code1;
+    }
+  }
+  return encoded;
+}
+
+// Build a TTS URL with proper encoding
+String makeTTSUrl(const String& chunk, const char* lang = "tl", const char* speed = "1") {
+  String url = queryTemplate;
+  url.replace("%1", lang);
+  url.replace("%2", speed);
+  String encoded = urlEncode(chunk);
+  url.replace("%3", encoded);
+  return url;
+}
+
+// Split text into chunks for TTS (Google TTS has a 200 character limit)
+void splitText(const String& text, size_t maxLen, std::vector<String>& outChunks) {
+  size_t start = 0, len = text.length();
+  
+  outChunks.clear();
+  
+  while (start < len) {
+    // Determine end idx
+    size_t end = start + maxLen;
+    if (end >= len) {
+      end = len;
+    } else {
+      // backtrack to last space
+      size_t lastSpace = text.lastIndexOf(' ', end);
+      if (lastSpace > start) end = lastSpace;
+    }
+    outChunks.push_back(text.substring(start, end));
+    // skip any spaces at beginning of next chunk
+    start = end;
+    while (start < len && text.charAt(start) == ' ') start++;
+  }
+}
+
+// TTS playback task - plays text using Google TTS API
+void ttsPlaybackTask(void *parameter) {
+  Serial.println("Starting TTS playback task");
+  
+  // Reset audio playback flag
+  if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+    audioPlaybackFinished = false;
+    xSemaphoreGive(audioStatusMutex);
+  }
+  
+  // Get text from parameter
+  String* textToSpeak = (String*)parameter;
+  if (textToSpeak == NULL || textToSpeak->length() == 0) {
+    Serial.println("No text to speak!");
+    
+    // Set flag that audio playback is finished (even though it didn't start)
+    if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+      audioPlaybackFinished = true;
+      xSemaphoreGive(audioStatusMutex);
+    }
+    
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  Serial.print("Text to speak: ");
+  Serial.println(*textToSpeak);
+  
+  // Configure I2S
+  auto i2sConfig = i2sStream.defaultConfig(TX_MODE);
+  i2sConfig.pin_bck = I2S_BCLK;
+  i2sConfig.pin_ws = I2S_LRC;
+  i2sConfig.pin_data = I2S_DOUT;
+  i2sConfig.bits_per_sample = 4;
+  i2sConfig.sample_rate = 4096;
+  i2sConfig.channels        = 2;
+  i2sConfig.channel_format  = I2SChannelSelect::Stereo;
+  i2sStream.begin(i2sConfig);
+  
+  // Initialize decoder
+  ttsDecoder.begin();
+  
+  // Split into ≤200‐char chunks (Google TTS limit)
+  std::vector<String> chunks;
+  splitText(*textToSpeak, 200, chunks);
+  Serial.printf("Text divided into %u chunk(s)\n", chunks.size());
+  
+  // Stream each chunk in order
+  for (size_t i = 0; i < chunks.size(); ++i) {
+    String urlStr = makeTTSUrl(chunks[i], "tl", "1");
+    Serial.printf("Chunk %u URL:\n%s\n", i + 1, urlStr.c_str());
+
+    // Start streaming this chunk
+    url.begin(urlStr.c_str(), "audio/mp3");
+    Serial.printf("Playing chunk %u/%u...\n", i + 1, chunks.size());
+
+    // Copy until this chunk's MP3 stream ends
+    while (ttsCopier.copy() > 0) {
+      // Keep pumping audio, but allow other tasks to run
+      vTaskDelay(1);
+    }
+    Serial.printf("Chunk %u done.\n\n", i + 1);
+  }
+  
+  Serial.println("TTS playback completed");
+  
+  // Clean up
+  ttsDecoder.end();
+  i2sStream.end();
+  
+  // Set flag that audio playback is finished
+  if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+    audioPlaybackFinished = true;
+    xSemaphoreGive(audioStatusMutex);
+  }
+  
+  // Free the parameter memory
+  delete textToSpeak;
+  
+  // Delete this task
+  vTaskDelete(NULL);
+}
+
+// Task to wait for audio playback to finish before playing TTS
+void waitForAudioThenTTS(void *parameter) {
+  String* textToSpeak = (String*)parameter;
+  
+  if (textToSpeak == NULL) {
+    Serial.println("No TTS text provided, exiting task");
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  Serial.println("Waiting for audio file to finish before playing TTS...");
+  
+  // Wait for audio playback to finish
+  bool isAudioFinished = false;
+  while (!isAudioFinished) {
+    if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+      isAudioFinished = audioPlaybackFinished;
+      xSemaphoreGive(audioStatusMutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(100)); // Check every 100ms
+  }
+  
+  Serial.println("Audio file finished, now playing TTS message");
+  
+  // Reset audio playback flag for TTS playback
+  if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+    audioPlaybackFinished = false;
+    xSemaphoreGive(audioStatusMutex);
+  }
+  
+  // Create TTS playback task
+  xTaskCreate(
+    ttsPlaybackTask,     // Task function
+    "TTSSeqTask",        // Task name
+    8192,                // Stack size
+    textToSpeak,         // Pass TTS text as parameter (memory will be freed by ttsPlaybackTask)
+    1,                   // Task priority
+    NULL                 // Task handle not needed
+  );
+  
+  // This task can now end as ttsPlaybackTask will handle the TTS playback
   vTaskDelete(NULL);
 }
 
@@ -1426,6 +1741,9 @@ void setup() {
   digitalWrite(LED_ONE, LOW);
   digitalWrite(LED_TWO, LOW);
   digitalWrite(LED_THREE, LOW);
+  pinMode(AI_LED_ONE, OUTPUT);
+  pinMode(AI_LED_TWO, OUTPUT);
+  pinMode(AI_LED_THREE, OUTPUT);
 
   Serial.println("\nESP32 Button SMS Sender with FreeRTOS, Supabase and Weather Integration");
 
@@ -1475,7 +1793,7 @@ void setup() {
   Serial.println("SD card initialized.");
 
   // List files on SD card
-  listDir(SD, "/", 0);
+  // listDir(SD, "/", 0);
 
   // Audio will play only when AI button is pressed
   // Removed automatic audio playback task creation
@@ -1521,7 +1839,7 @@ void setup() {
   xTaskCreate(
     weatherTask,     // Task function
     "WeatherTask",   // Task name
-    8192,           // Increased stack size from 4096 to 8192
+    10000,           // Increased stack size from 4096 to 8192
     NULL,           // Task parameters
     1,              // Task priority
     &weatherTaskHandle
@@ -1535,6 +1853,9 @@ void setup() {
     2,             // Task priority
     &wifiTaskHandle
   );
+
+  // Initialize TTS URL stream with WiFi credentials
+  url.begin(ssid, password);
 
   Serial.println("ESP32 HC-SR04 Distance Sensor with FreeRTOS Started");
 }
