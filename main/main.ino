@@ -114,7 +114,7 @@ volatile int stabilizationReadings = 0;   // Counter for stabilization readings
 unsigned long startupTime = 0;  // Track when system started
 
 // Audio playback status and SMS delay
-volatile bool audioPlaybackFinished = false;
+volatile bool audioPlaybackFinished = true; // Initialize to true since no audio is playing at startup
 SemaphoreHandle_t audioStatusMutex;
 TaskHandle_t audioTaskHandle = NULL;
 
@@ -1138,85 +1138,124 @@ void weatherTask(void *pvParameters) {
   // Add a small delay to ensure proper task initialization
   vTaskDelay(pdMS_TO_TICKS(1000));
   
-  // Get initial location and weather data
+  // --- INITIAL DATA FETCH AT STARTUP ---
+  Serial.println("WeatherTask: Initial data fetch sequence started.");
+  bool initialLocationSuccess = false;
   int retries = 0;
-  while (!getLocationFromIpInfo() && retries < 3) {
-    Serial.println("Retrying location fetch...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    retries++;
+  while (!initialLocationSuccess && retries < 3) {
+    if (getLocationFromIpInfo()) {
+      initialLocationSuccess = true;
+      Serial.println("WeatherTask: Initial location fetched successfully.");
+    } else {
+      Serial.println("WeatherTask: Initial location fetch attempt failed. Retrying...");
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      retries++;
+    }
   }
   
-  if (retries >= 3) {
-    Serial.println("Could not get location from IP. Using fallback coordinates.");
-    latitude = fallback_latitude;
-    longitude = fallback_longitude;
+  if (!initialLocationSuccess) {
+    Serial.println("WeatherTask: Could not get initial location from IP. Using fallback coordinates.");
+    // Safely take mutex to update coordinates
+    if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      latitude = fallback_latitude;
+      longitude = fallback_longitude;
+      // cityName might remain default or be updated by a failed getLocationFromIpInfo attempt
+      xSemaphoreGive(weatherDataMutex);
+    }
   }
-  
+
+  // Fetch initial weather and AI suggestion regardless of location success (will use current lat/lon)
   retries = 0;
-  while (!getWeather() && retries < 3) {
-    Serial.println("Retrying weather fetch...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    retries++;
-  }
-  
-  if (retries < 3) {
-    Serial.println("Weather data fetch successful!");
-    // Get AI suggestion with a delay to avoid stack issues
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    if (getAISuggestion()) {
-      Serial.println("AI suggestion fetch successful!");
-    } else {
-      Serial.println("AI suggestion fetch failed. Using default message.");
-    }
-  } else {
-    Serial.println("Could not fetch weather data. Using default values.");
-  }
-  
-  // Always update SMS body, even with default values if data fetch failed
-  updateSmsBody();
-  weatherInitialized = true;
-  
-  while (1) {
-    if (WiFi.status() == WL_CONNECTED) {
-      bool locationUpdated = false;
-      bool weatherUpdated = false;
-      
-      // Try to update location first
-      if (getLocationFromIpInfo()) {
-        locationUpdated = true;
-        Serial.println("Location data updated");
+  bool initialWeatherSuccess = false;
+  while(!initialWeatherSuccess && retries < 3) {
+    if (getWeather()) {
+      Serial.println("WeatherTask: Initial weather data fetched successfully.");
+      initialWeatherSuccess = true;
+      // Get AI suggestion with a delay to avoid stack issues
+      vTaskDelay(pdMS_TO_TICKS(1000)); // Small delay before AI call
+      if (getAISuggestion()) {
+        Serial.println("WeatherTask: Initial AI suggestion fetched successfully.");
       } else {
-        Serial.println("Location update failed. Using previous coordinates.");
-      }
-      
-      // Only update weather if location was updated or it's time for a refresh
-      if (locationUpdated || !weatherUpdated) {
-        if (getWeather()) {
-          weatherUpdated = true;
-          Serial.println("Weather data updated");
-          // Add a small delay before making the AI call
-          vTaskDelay(pdMS_TO_TICKS(1000));
-        } else {
-          Serial.println("Weather update failed. Keeping previous values.");
-        }
-        
-        // Get updated AI suggestion only if weather was updated successfully
-        if (weatherUpdated) {
-          if (getAISuggestion()) {
-            Serial.println("AI suggestion updated");
-          } else {
-            Serial.println("AI suggestion update failed. Keeping previous message.");
-          }
-          
-          updateSmsBody();
-          Serial.println("SMS body updated with new data");
-        }
+        Serial.println("WeatherTask: Initial AI suggestion fetch failed. Default AI message will be used.");
       }
     } else {
-      Serial.println("WiFi disconnected. Cannot update weather.");
+      Serial.println("WeatherTask: Initial weather fetch attempt failed. Retrying...");
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      retries++;
     }
-    // Update weather every 15 minutes (900000 ms)
-    vTaskDelay(pdMS_TO_TICKS(900000));
+  }
+   if (!initialWeatherSuccess) {
+    Serial.println("WeatherTask: Could not fetch initial weather data. Default weather values will be used.");
+  }
+  
+  updateSmsBody(); // Update SMS body with initial (or default) data
+  weatherInitialized = true; // Signal that initial setup is complete
+  Serial.println("WeatherTask: Initial data fetch sequence complete.");
+
+  // --- PERIODIC UPDATE LOOP ---
+  while (1) {
+    vTaskDelay(pdMS_TO_TICKS(900000)); // Wait 15 minutes for the next update cycle
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("WeatherTask: Periodic update cycle started.");
+
+      // Store current location data before attempting to update
+      float previousLatitude, previousLongitude;
+      String previousCityName;
+      if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        previousLatitude = latitude;
+        previousLongitude = longitude;
+        previousCityName = cityName;
+        xSemaphoreGive(weatherDataMutex);
+      } else {
+        Serial.println("WeatherTask: Could not get mutex for previous location data. Skipping update cycle.");
+        continue;
+      }
+
+      bool newLocationFetched = getLocationFromIpInfo();
+      
+      if (newLocationFetched) {
+        Serial.println("WeatherTask: Successfully fetched new location data for periodic update.");
+        bool locationHasActuallyChanged = false;
+        // Check if location actually changed
+        if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          if (latitude != previousLatitude || longitude != previousLongitude || cityName != previousCityName) {
+            locationHasActuallyChanged = true;
+            Serial.printf("WeatherTask: Location changed. Old: %s (%.6f, %.6f), New: %s (%.6f, %.6f)\n",
+                          previousCityName.c_str(), previousLatitude, previousLongitude,
+                          cityName.c_str(), latitude, longitude);
+          } else {
+            Serial.println("WeatherTask: Location data refreshed, but coordinates and city name are unchanged.");
+          }
+          xSemaphoreGive(weatherDataMutex);
+        } else {
+            Serial.println("WeatherTask: Could not get mutex to check if location changed. Assuming it did not.");
+        }
+
+        if (locationHasActuallyChanged) {
+          Serial.println("WeatherTask: Location has changed, proceeding to update weather and AI suggestion.");
+          if (getWeather()) {
+            Serial.println("WeatherTask: Weather data updated successfully after location change.");
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Small delay
+            if (getAISuggestion()) {
+              Serial.println("WeatherTask: AI suggestion updated successfully after location change.");
+            } else {
+              Serial.println("WeatherTask: AI suggestion update failed after location change.");
+            }
+            updateSmsBody();
+            Serial.println("WeatherTask: SMS body updated with new data after location change.");
+          } else {
+            Serial.println("WeatherTask: Weather update failed after location change. SMS body not updated with new weather.");
+          }
+        } else {
+          Serial.println("WeatherTask: Location unchanged, skipping weather/AI update.");
+        }
+      } else {
+        Serial.println("WeatherTask: Periodic location update failed. Weather/AI not updated.");
+      }
+    } else {
+      Serial.println("WeatherTask: WiFi disconnected. Cannot perform periodic update.");
+    }
   }
 }
 
@@ -1317,10 +1356,22 @@ void databaseTask(void *pvParameters) {
   esp_task_wdt_delete(NULL); // Remove current task from WDT watch
   
   while (1) {
-    if (WiFi.status() == WL_CONNECTED) {
-      fetchPhoneNumbers();
+    // Check if audio is currently playing
+    bool isAudioPlaying = false;
+    if (xSemaphoreTake(audioStatusMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      isAudioPlaying = !audioPlaybackFinished;
+      xSemaphoreGive(audioStatusMutex);
     }
-    // Check every 5 seconds for new phone numbers
+    
+    // Only fetch phone numbers if audio is not playing
+    if (WiFi.status() == WL_CONNECTED && !isAudioPlaying) {
+      Serial.println("Fetching phone numbers...");
+      fetchPhoneNumbers();
+    } else if (isAudioPlaying) {
+      Serial.println("Audio is playing - skipping phone number fetch");
+    }
+    
+    // Check every 10 seconds for new phone numbers
     vTaskDelay(pdMS_TO_TICKS(10000));
   }
 }
@@ -1432,8 +1483,8 @@ void audioPlaybackTask(void *parameter) {
   i2sConfig.pin_bck = I2S_BCLK;
   i2sConfig.pin_ws = I2S_LRC;
   i2sConfig.pin_data = I2S_DOUT;
-  i2sConfig.buffer_size = 8192;  // Increase buffer size
-  i2sConfig.buffer_count = 8;    // Increase buffer count
+  i2sConfig.buffer_size = 4096;  // Reduced buffer size
+  i2sConfig.buffer_count = 4;    // Reduced buffer count
   i2sConfig.channels        = 2;
   i2sConfig.channel_format  = I2SChannelSelect::Stereo;
   i2sStream.begin(i2sConfig);
@@ -1549,7 +1600,7 @@ String urlEncode(const String& text) {
 }
 
 // Build a TTS URL with proper encoding
-String makeTTSUrl(const String& chunk, const char* lang = "tl", const char* speed = "1") {
+String makeTTSUrl(const String& chunk, const char* lang, const char* speed) {
   String url = queryTemplate;
   url.replace("%1", lang);
   url.replace("%2", speed);
@@ -1609,15 +1660,17 @@ void ttsPlaybackTask(void *parameter) {
   Serial.print("Text to speak: ");
   Serial.println(*textToSpeak);
   
-  // Configure I2S
+  // Configure I2S with proper audio settings
   auto i2sConfig = i2sStream.defaultConfig(TX_MODE);
   i2sConfig.pin_bck = I2S_BCLK;
   i2sConfig.pin_ws = I2S_LRC;
   i2sConfig.pin_data = I2S_DOUT;
-  i2sConfig.bits_per_sample = 4;
-  i2sConfig.sample_rate = 4096;
-  i2sConfig.channels        = 2;
-  i2sConfig.channel_format  = I2SChannelSelect::Stereo;
+  i2sConfig.bits_per_sample = 16;      // Standard for audio
+  i2sConfig.sample_rate = 44100;       // Standard for MP3
+  i2sConfig.buffer_size = 4096;        // Reduced buffer size
+  i2sConfig.buffer_count = 4;          // Reduced buffer count
+  i2sConfig.channels = 2;
+  i2sConfig.channel_format = I2SChannelSelect::Stereo;
   i2sStream.begin(i2sConfig);
   
   // Initialize decoder
@@ -1635,14 +1688,41 @@ void ttsPlaybackTask(void *parameter) {
 
     // Start streaming this chunk
     url.begin(urlStr.c_str(), "audio/mp3");
+    
+    // Wait for connection and buffer to fill
+    Serial.printf("Buffering chunk %u/%u...\n", i + 1, chunks.size());
+    vTaskDelay(pdMS_TO_TICKS(500));  // Allow time for initial buffer to fill
+    
     Serial.printf("Playing chunk %u/%u...\n", i + 1, chunks.size());
+    
+    size_t current_chunk_bytes_read = 0; // Switched to size_t
+    int empty_reads_count = 0;
+    const int MAX_EMPTY_READS_STALL = 150;  // Increased timeout: 150 cycles * 20ms/cycle = 3 seconds
+    const int TTS_COPY_LOOP_DELAY_MS = 20; // Adjusted delay
 
-    // Copy until this chunk's MP3 stream ends
-    while (ttsCopier.copy() > 0) {
-      // Keep pumping audio, but allow other tasks to run
-      vTaskDelay(1);
+    while (true) {
+        size_t bytes_copied_this_step = ttsCopier.copy(); // Switched to size_t
+
+        if (bytes_copied_this_step > 0) {
+            current_chunk_bytes_read += bytes_copied_this_step;
+            empty_reads_count = 0;  // Reset counter as we received data
+        } else { // bytes_copied_this_step == 0 (since size_t is unsigned)
+            empty_reads_count++;
+            if (empty_reads_count > MAX_EMPTY_READS_STALL) {
+                Serial.printf("Chunk %u: Timeout after %d empty reads. Assuming end of chunk or network stall.\n", i + 1, empty_reads_count);
+                break; 
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(TTS_COPY_LOOP_DELAY_MS));
     }
-    Serial.printf("Chunk %u done.\n\n", i + 1);
+    
+    Serial.printf("Chunk %u done. Read %zu bytes\n", i + 1, current_chunk_bytes_read); // Use %zu for size_t
+    
+    // Close URL stream for this chunk
+    url.end();
+    
+    // Small delay between chunks
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
   
   Serial.println("TTS playback completed");
