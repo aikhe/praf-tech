@@ -133,7 +133,7 @@ unsigned long lastLCDUpdateTime = 0;  // Track last LCD update time
 String currentDisplayedStatus = "";   // Track last status display to avoid unnecessary updates
 unsigned long lcdLockStartTime = 0;   // When the LCD text was locked
 bool lcdTextLocked = false;           // Whether LCD is showing locked text
-#define LCD_LOCK_TIME_MS 60000         // 5 seconds to lock LCD text after level detection
+#define LCD_LOCK_TIME_MS 60000         // 60 seconds (1 minute) to lock LCD text after level detection
 #define LCD_UPDATE_INTERVAL 4000      // ms - longer interval for normal updates
 
 // Task function prototypes
@@ -472,7 +472,7 @@ void controlOutputsTask(void *parameter) {
         Serial.print("Status: ");
         Serial.println(statusMessage);
         Serial.println("Timer reset to 10 minutes");
-        Serial.println("LCD text locked for 5 seconds");
+        Serial.printf("LCD text locked for %lu seconds\n", LCD_LOCK_TIME_MS / 1000);
         
         // Create appropriate SMS message based on flood level
         switch(currentRange) {
@@ -597,15 +597,15 @@ void controlOutputsTask(void *parameter) {
         digitalWrite(LED_THREE, LOW);
         
         // Update LCD with normal monitoring status if not already showing
-        if (currentDisplayedStatus != "Normal") {
+        if (currentDisplayedStatus != "Normal") { // Or if it's different from the standard weather display
           lcd.clear();
           lcd.setCursor(0, 0);
-          lcd.print("Loc: ");
-          lcd.print(cityName);
+          lcd.print(cityName); // Standardized display
           lcd.setCursor(0, 1);
           lcd.print(weatherDescription);
           lcd.print(" ");
-          lcd.print(temperature);
+          lcd.print((int)temperature);
+          lcd.print("C");
           
           currentDisplayedStatus = "Normal";
         }
@@ -789,8 +789,9 @@ bool getAISuggestion() {
                   ", " + String(temperature, 1) + "°C (feels like " + 
                   String(feelsLike, 1) + "°C), humidity " + String(humidity, 0) + "%. ";
   
-  prompt += "Write a 2-3 sentence message in Tagalog that: 1) Starts with 'PRAF Technology Weather Update:' ";
+  prompt += "Write a 200 word message in Tagalog that: 1) Starts with 'Ayon sa pinakabagong update ng PRAF Technology:' ";
   prompt += "2) Includes flood risk assessment 3) Describes current weather 4) Gives a safety tip.";
+  prompt += "atlast have a sense of humour that will lighten the resident mood up.";
   
   // Use a more memory-efficient approach with smaller JSON document
   DynamicJsonDocument requestDoc(1024);  // Reduced size
@@ -874,8 +875,8 @@ void updateSmsBody() {
       "🌡️ Feels like: %.1f°C\n"
       "💧 Humidity: %.0f%%\n\n"
       "🤖 AI Weather Update:\n"
-      "%s\n\n"
-      "Stay safe and informed!\n\n"
+      "%s\n"
+      "🤍 Stay safe and informed!\n\n"
       "From: PRAF Technology",
       cityName.c_str(), localWeatherDesc.c_str(), localTemp, localFeelsLike, localHumidity,
       localAIMessage.c_str()
@@ -1299,9 +1300,9 @@ void buttonTask(void *pvParameters) {
 
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("AI Suggest");
+        lcd.print("AI Assistant"); // New LCD message
         lcd.setCursor(0, 1);
-        lcd.print("PRAF Tech");
+        lcd.print("Processing...");  // New LCD message
 
         // 1. Play AI-NOTIF.mp3
         if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
@@ -1358,6 +1359,12 @@ void buttonTask(void *pvParameters) {
       // If SMS button is pressed (LOW)
       if (reading == LOW) { // Check 'reading' for SMS button, not 'ai'
         Serial.println("SMS Button pressed! Playing SMS sent sound...");
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("SMS Queued");     // New LCD message
+        lcd.setCursor(0, 1);
+        lcd.print("Please Wait..."); // New LCD message
 
         // 2. Create the LED animation task (as added by user)
         xTaskCreate(
@@ -1735,17 +1742,17 @@ void ttsPlaybackTask(void *parameter) {
     // Start streaming this chunk
     url.begin(urlStr.c_str(), "audio/mp3");
     
-    // Wait for connection and buffer to fill (only for the first chunk)
+    // Wait for connection and buffer to fill
     if (i == 0) {
-      Serial.printf("Buffering initial chunk %u/%u...\n", i + 1, chunks.size());
+      Serial.printf("Buffering initial chunk %u/%u (will wait 500ms)...\n", i + 1, chunks.size());
       vTaskDelay(pdMS_TO_TICKS(500));  // Allow time for initial buffer to fill
     } else {
-      Serial.printf("Buffering subsequent chunk %u/%u...\n", i + 1, chunks.size());
-      // Maybe a much smaller delay or none for subsequent chunks if stream is already active
-      // For now, let's rely on the copy loop's inherent handling and the inter-chunk delay after `url.end()`
+      Serial.printf("Buffering subsequent chunk %u/%u (will wait 200ms)...\n", i + 1, chunks.size());
+      // Add a smaller, consistent delay for subsequent chunks to allow some initial buffering
+      vTaskDelay(pdMS_TO_TICKS(200)); 
     }
     
-    Serial.printf("Playing chunk %u/%u...\n", i + 1, chunks.size());
+    Serial.printf("Playing chunk %u/%u...\n", i + 1, chunks.size()); // Log placed before copy loop
     
     size_t current_chunk_bytes_read = 0; // Switched to size_t
     int empty_reads_count = 0;
