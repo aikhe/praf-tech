@@ -641,32 +641,46 @@ bool getLocationFromIpInfo() {
       String loc = doc["loc"].as<String>();
       int commaIndex = loc.indexOf(',');
       if (commaIndex > 0) {
-        latitude = loc.substring(0, commaIndex).toFloat();
-        longitude = loc.substring(commaIndex + 1).toFloat();
-        String city = "Unknown";
-        String region = "Unknown";
-        String country = "Unknown";
+        float parsed_latitude = loc.substring(0, commaIndex).toFloat();
+        float parsed_longitude = loc.substring(commaIndex + 1).toFloat();
+        String parsed_city_from_ipinfo = "";
         if (doc.containsKey("city")) {
-          city = doc["city"].as<String>();
+          parsed_city_from_ipinfo = doc["city"].as<String>();
         }
-        if (doc.containsKey("region")) {
-          region = doc["region"].as<String>();
+
+        // Safely update global weather data variables
+        if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          latitude = parsed_latitude;
+          longitude = parsed_longitude;
+          if (!parsed_city_from_ipinfo.isEmpty()) {
+            cityName = parsed_city_from_ipinfo; // Update global cityName
+          }
+          xSemaphoreGive(weatherDataMutex);
+        } else {
+          Serial.println("getLocationFromIpInfo: Failed to take weatherDataMutex for update.");
+          // success remains true to allow logging of parsed data, but globals might be stale
         }
-        if (doc.containsKey("country")) {
-          country = doc["country"].as<String>();
-        }
+        
+        // For logging, use the values parsed in this specific function call
+        String city_for_log = !parsed_city_from_ipinfo.isEmpty() ? parsed_city_from_ipinfo : "N/A";
+        String region_for_log = doc.containsKey("region") ? doc["region"].as<String>() : "N/A";
+        String country_for_log = doc.containsKey("country") ? doc["country"].as<String>() : "N/A";
+
         Serial.print("Detected Location: ");
-        Serial.print(city);
+        Serial.print(city_for_log);
         Serial.print(", ");
-        Serial.print(region);
+        Serial.print(region_for_log);
         Serial.print(", ");
-        Serial.println(country);
+        Serial.println(country_for_log);
         Serial.print("Coordinates from ipinfo.io: ");
-        Serial.print(latitude, 6);
+        Serial.print(parsed_latitude, 6);
         Serial.print(", ");
-        Serial.println(longitude, 6);
+        Serial.println(parsed_longitude, 6);
         success = true;
       }
+    } else if (error) {
+      Serial.print("Failed to parse IPInfo response: ");
+      Serial.println(error.c_str());
     }
   } else {
     Serial.print("Failed to get location from IPInfo, HTTP code: ");
@@ -703,9 +717,9 @@ bool getWeather() {
     if (!error) {
       // Take mutex before updating shared weather data
       if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        if (doc.containsKey("name")) {
-          cityName = doc["name"].as<String>();
-        }
+        // if (doc.containsKey("name")) {  // Keep cityName from ipinfo.io if available
+        //   cityName = doc["name"].as<String>();
+        // }
 
         if (doc.containsKey("weather") && doc["weather"][0].containsKey("description")) {
           weatherDescription = doc["weather"][0]["description"].as<String>();
@@ -1281,7 +1295,7 @@ void buttonTask(void *pvParameters) {
     if ((xTaskGetTickCount() * portTICK_PERIOD_MS - lastDebounceTime) > DEBOUNCE_DELAY) {
       // If AI button is pressed (LOW)
       if (ai == LOW) {
-        Serial.println("AI Button pressed! Starting TTS with weather message...");
+        Serial.println("AI Button pressed! Playing AI notification sound...");
 
         lcd.clear();
         lcd.setCursor(0, 0);
@@ -1289,7 +1303,22 @@ void buttonTask(void *pvParameters) {
         lcd.setCursor(0, 1);
         lcd.print("PRAF Tech");
 
-        // Create the LED animation task
+        // 1. Play AI-NOTIF.mp3
+        if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+          audioPlaybackFinished = false;
+          xSemaphoreGive(audioStatusMutex);
+        }
+        static const char* aiNotifFile = "/AI-NOTIF.mp3";
+        xTaskCreate(
+          audioPlaybackTask,    // Task function
+          "AINotifAudioTask",   // Task name
+          4096,                 // Stack size
+          (void*)aiNotifFile,   // Task parameter
+          1,                    // Task priority
+          NULL                  // Task handle
+        );
+
+        // 2. Create the LED animation task
         xTaskCreate(
           ledAnimationTask,  // Task function
           "LEDTask",         // Task name
@@ -1299,31 +1328,25 @@ void buttonTask(void *pvParameters) {
           &ledTaskHandle     // Task handle
         );
         
-        // Get the weather message with mutex protection
+        // 3. Get the weather message
         String* weatherTextToSpeak = NULL;
-        
         if (xSemaphoreTake(weatherDataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
           weatherTextToSpeak = new String(aiWeatherMessage);
           xSemaphoreGive(weatherDataMutex);
         } else {
           weatherTextToSpeak = new String("Hindi makuha ang weather update. Subukan ulit.");
-          Serial.println("Failed to get weather message, using default");
+          Serial.println("Failed to get weather message for TTS, using default");
         }
         
-        // Reset audio playback flag before starting
-        if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
-          audioPlaybackFinished = false;
-          xSemaphoreGive(audioStatusMutex);
-        }
-        
-        // Create TTS playback task with weather message
+        // 4. Create task to wait for AI-NOTIF.mp3 then play TTS
+        // waitForAudioThenTTS will manage audioPlaybackFinished for the TTS part
         xTaskCreate(
-          ttsPlaybackTask,     // Task function
-          "TTSTask",           // Task name
-          8192,                // Stack size (doubled from audio task)
+          waitForAudioThenTTS, // Task function
+          "WaitThenTTSTask",   // Task name
+          8192,                // Stack size
           weatherTextToSpeak,  // Pass weather message as parameter
           1,                   // Task priority
-          &audioTaskHandle     // Store task handle to check status
+          NULL                 // Task handle
         );
         
         // Wait for button release to prevent multiple triggers
@@ -1332,9 +1355,38 @@ void buttonTask(void *pvParameters) {
         }
       }
 
-      if (reading == LOW) {
-        Serial.println("Button pressed! Queueing SMS...");
-        // Send a message to the queue
+      // If SMS button is pressed (LOW)
+      if (reading == LOW) { // Check 'reading' for SMS button, not 'ai'
+        Serial.println("SMS Button pressed! Playing SMS sent sound...");
+
+        // 2. Create the LED animation task (as added by user)
+        xTaskCreate(
+          ledAnimationTask,  // Task function
+          "LEDTask",         // Task name
+          2000,              // Stack size
+          NULL,              // Task parameters
+          1,                 // Priority
+          &ledTaskHandle     // Task handle
+        );
+        
+
+        // 1. Play SMS-SENT-VOICE.mp3
+        if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
+          audioPlaybackFinished = false;
+          xSemaphoreGive(audioStatusMutex);
+        }
+        static const char* smsSentFile = "/SMS-SENT-VOICE.mp3";
+        xTaskCreate(
+          audioPlaybackTask,    // Task function
+          "SMSSentAudioTask",   // Task name
+          4096,                 // Stack size
+          (void*)smsSentFile,   // Task parameter
+          1,                    // Task priority
+          NULL                  // Task handle
+        );
+
+        // 3. Queue the SMS
+        Serial.println("Button pressed! Queueing SMS..."); // Original log
         int signalValue = 1;
         xQueueSend(smsQueue, &signalValue, 0);
         
@@ -1558,12 +1610,6 @@ void smsSendDelayTask(void *parameter) {
     Serial.println("Failed to queue SMS - queue might be full");
   }
   
-  // Reset audio playback flag for next time
-  if (xSemaphoreTake(audioStatusMutex, portMAX_DELAY) == pdTRUE) {
-    audioPlaybackFinished = false;
-    xSemaphoreGive(audioStatusMutex);
-  }
-  
   // Delete this task
   vTaskDelete(NULL);
 }
@@ -1689,9 +1735,15 @@ void ttsPlaybackTask(void *parameter) {
     // Start streaming this chunk
     url.begin(urlStr.c_str(), "audio/mp3");
     
-    // Wait for connection and buffer to fill
-    Serial.printf("Buffering chunk %u/%u...\n", i + 1, chunks.size());
-    vTaskDelay(pdMS_TO_TICKS(500));  // Allow time for initial buffer to fill
+    // Wait for connection and buffer to fill (only for the first chunk)
+    if (i == 0) {
+      Serial.printf("Buffering initial chunk %u/%u...\n", i + 1, chunks.size());
+      vTaskDelay(pdMS_TO_TICKS(500));  // Allow time for initial buffer to fill
+    } else {
+      Serial.printf("Buffering subsequent chunk %u/%u...\n", i + 1, chunks.size());
+      // Maybe a much smaller delay or none for subsequent chunks if stream is already active
+      // For now, let's rely on the copy loop's inherent handling and the inter-chunk delay after `url.end()`
+    }
     
     Serial.printf("Playing chunk %u/%u...\n", i + 1, chunks.size());
     
@@ -1722,7 +1774,7 @@ void ttsPlaybackTask(void *parameter) {
     url.end();
     
     // Small delay between chunks
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50)); // Reduced delay from 100ms to 50ms
   }
   
   Serial.println("TTS playback completed");
@@ -1874,6 +1926,18 @@ void setup() {
 
   // List files on SD card
   // listDir(SD, "/", 0);
+
+  // Play startup sound
+  Serial.println("Playing startup sound: /DEVICE-START-VOICE.mp3");
+  static const char* startupAudioFile = "/DEVICE-START-VOICE.mp3";
+  xTaskCreate(
+    audioPlaybackTask,    // Task function
+    "StartupAudioTask",   // Task name
+    4096,                 // Stack size
+    (void*)startupAudioFile, // Task parameter - audio filename
+    1,                    // Task priority
+    NULL                  // Task handle (not needed for this one-shot task)
+  );
 
   // Audio will play only when AI button is pressed
   // Removed automatic audio playback task creation
