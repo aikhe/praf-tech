@@ -1,0 +1,13 @@
+[build]
+command = "node cloudflare-build.js"
+publish = "dist"
+pages_build_output_dir = "dist"
+
+[build.environment]
+NODE_VERSION = "18"
+NPM_FLAGS = "--no-package-lock"
+
+[[redirects]]
+from = "/*"
+to = "/index.html"
+status = 200 

@@ -1,0 +1,9 @@
+{
+  "command": "npm install --no-package-lock && npm run build",
+  "packageManager": "npm",
+  "rootDir": "./",
+  "outputDir": "dist",
+  "environment": {
+    "NODE_VERSION": "18"
+  }
+} 

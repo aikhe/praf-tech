@@ -1,0 +1,18 @@
+{
+  "build": {
+    "command": "npm install && npm run build",
+    "output_directory": "dist",
+    "root_directory": "./",
+    "environment": {
+      "NODE_VERSION": "18"
+    }
+  },
+  "routes": [
+    {
+      "pattern": "/*",
+      "script": null,
+      "dest": "/index.html",
+      "status": 200
+    }
+  ]
+} 

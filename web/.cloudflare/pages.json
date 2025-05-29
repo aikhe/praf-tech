@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "resources": {
+    "build": {
+      "command": "npm install --no-package-lock && npm run build",
+      "output_directory": "dist",
+      "environment": {
+        "NODE_VERSION": "18"
+      }
+    }
+  },
+  "http": {
+    "routes": [
+      {
+        "pattern": "/*",
+        "dest": "/index.html",
+        "status": 200
+      }
+    ]
+  }
+} 
