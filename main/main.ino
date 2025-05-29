@@ -487,8 +487,8 @@ void controlOutputsTask(void *parameter) {
             }
             
             // Play audio when Level 1 flood is detected
-            Serial.println("Level 1 flood detected! Playing LOW-FLOOD-HIGH.mp3");
-            static const char* floodAudioFile = "/LOW-FLOOD-HIGH.mp3";
+            Serial.println("Level 1 flood detected! Playing LOW-FLOOD-FULL.mp3");
+            static const char* floodAudioFile = "/LOW-FLOOD-FULL.mp3";
             xTaskCreate(
               audioPlaybackTask,    // Task function
               "AudioTask",          // Task name
@@ -521,8 +521,8 @@ void controlOutputsTask(void *parameter) {
             }
             
             // Play audio when Level 2 flood is detected
-            Serial.println("Level 2 flood detected! Playing MEDIUM-FLOOD-HIGH2.mp3");
-            static const char* mediumFloodAudioFile = "/MEDIUM-FLOOD-HIGH2.mp3";
+            Serial.println("Level 2 flood detected! Playing MEDIUM-FLOOD-FULL.mp3");
+            static const char* mediumFloodAudioFile = "/MEDIUM-FLOOD-FULL.mp3";
             xTaskCreate(
               audioPlaybackTask,    // Task function
               "AudioTask",          // Task name
@@ -555,8 +555,8 @@ void controlOutputsTask(void *parameter) {
             }
             
             // Play audio when Level 3 flood is detected
-            Serial.println("Level 3 flood detected! Playing HIGH-FLOOD-HIGH2.mp3");
-            static const char* highFloodAudioFile = "/HIGH-FLOOD-HIGH2.mp3";
+            Serial.println("Level 3 flood detected! Playing HIGH-FLOOD-FULL.mp3");
+            static const char* highFloodAudioFile = "/HIGH-FLOOD-FULL.mp3";
             xTaskCreate(
               audioPlaybackTask,    // Task function
               "AudioTask",          // Task name
@@ -789,9 +789,9 @@ bool getAISuggestion() {
                   ", " + String(temperature, 1) + "°C (feels like " + 
                   String(feelsLike, 1) + "°C), humidity " + String(humidity, 0) + "%. ";
   
-  prompt += "Write a 200 word message in Tagalog that: 1) Starts with 'Ayon sa pinakabagong update ng PRAF Technology:' ";
+  prompt += "Write a 2-3 sentence message in Tagalog that: 1) Starts with 'Ayon sa pinakabagong update ng PRAF Technology:' ";
   prompt += "2) Includes flood risk assessment 3) Describes current weather 4) Gives a safety tip.";
-  prompt += "atlast have a sense of humour that will lighten the resident mood up.";
+  // prompt += "atlast have a sense of humour that will lighten the resident mood up.";
   
   // Use a more memory-efficient approach with smaller JSON document
   DynamicJsonDocument requestDoc(1024);  // Reduced size
@@ -1382,7 +1382,7 @@ void buttonTask(void *pvParameters) {
           audioPlaybackFinished = false;
           xSemaphoreGive(audioStatusMutex);
         }
-        static const char* smsSentFile = "/SMS-SENT-VOICE.mp3";
+        static const char* smsSentFile = "/NEW-NUM.mp3";
         xTaskCreate(
           audioPlaybackTask,    // Task function
           "SMSSentAudioTask",   // Task name
@@ -1523,7 +1523,7 @@ void audioPlaybackTask(void *parameter) {
   // Determine which file to play based on task parameter
   const char* filename = (const char*)parameter;
   if (filename == NULL) {
-    filename = "/DEVICE-START-VOICE.mp3";  // Default file if no parameter
+    filename = "/DEVICE-START-HIGH.mp3";  // Default file if no parameter
   }
   
   Serial.print("Opening audio file: ");
